@@ -37,6 +37,7 @@ import {
 } from "@/types/canvas";
 import { useDisableScrollBounce } from "@/hooks/use-disable-scroll-bounce";
 import { useDeleteLayers } from "@/hooks/use-delete-layers";
+import { captureWorkingArea } from "@/lib/capture-canvas";
 
 import { Info } from "./info";
 import { Path } from "./path";
@@ -45,12 +46,13 @@ import { LayerPreview } from "./layer-preview";
 import { SelectionBox } from "./selection-box";
 import { SelectionTools } from "./selection-tools";
 import { CursorsPresence } from "./cursors-presence";
-import { ProblemPanel } from "./problem-panel";
+import { ProblemPanel, type ProblemAnalysis } from "./problem-panel";
 import {
   HandwritingOverlay,
   type CanvasStepMarker,
 } from "./handwriting-overlay";
 import { StepMarkers } from "./step-markers";
+import { MarkingOverlay, type MarkedLine } from "@/app/board/[boardId]/_components/marking-overlay";
 import { ZoomControls } from "./zoom-controls";
 
 // High enough to be effectively unlimited for handwriting — each pen stroke
@@ -106,6 +108,21 @@ export const Canvas = ({
   });
   const [stepMarkers, setStepMarkers] = useState<CanvasStepMarker[]>([]);
 
+  // --- Submit Working state ---------------------------------------------
+  // markingResults: per-line marks returned by the vision model.
+  // workingBounds: the canvas-space rect that was captured (with padding),
+  //   used to position the tick/cross icons against the same frame the
+  //   model saw.
+  // isMarking: true while a marking request is in flight.
+  const [markingResults, setMarkingResults] = useState<MarkedLine[]>([]);
+  const [workingBounds, setWorkingBounds] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [isMarking, setIsMarking] = useState(false);
+
   const onProgressChange = useCallback((state: {
       isLoading: boolean;
       isCorrect: boolean;
@@ -143,6 +160,53 @@ export const Canvas = ({
       if (!id) continue;
       const layer = liveLayers.get(id);
       if (!layer) continue;
+      const x = layer.get("x");
+      const y = layer.get("y");
+      const w = layer.get("width");
+      const h = layer.get("height");
+      if (
+        typeof x !== "number" ||
+        typeof y !== "number" ||
+        typeof w !== "number" ||
+        typeof h !== "number"
+      ) {
+        continue;
+      }
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x + w > maxX) maxX = x + w;
+      if (y + h > maxY) maxY = y + h;
+    }
+
+    if (!Number.isFinite(minX)) return null;
+
+    return {
+      x: minX,
+      y: minY,
+      width: maxX - minX,
+      height: maxY - minY,
+    };
+  }, []);
+
+  // Bounding box of just the pen-stroke (Path) layers. Used by the Submit
+  // Working flow so the captured image only encloses the student's working,
+  // not the printed problem image or any other layers.
+  const getPathLayerBounds = useMutation(({ storage }) => {
+    const liveLayers = storage.get("layers");
+    const liveLayerIds = storage.get("layerIds");
+
+    let minX = Number.POSITIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+
+    for (let i = 0; i < liveLayerIds.length; i++) {
+      const id = liveLayerIds.get(i);
+      if (!id) continue;
+      const layer = liveLayers.get(id);
+      if (!layer) continue;
+      if (layer.get("type") !== LayerType.Path) continue;
+
       const x = layer.get("x");
       const y = layer.get("y");
       const w = layer.get("width");
@@ -817,11 +881,76 @@ const handlePointerUp = useCallback((e: React.PointerEvent) => {
     return null;
   });
 
-  // Clear step markers when the active problem changes so old markers don't
-  // linger across problem switches.
+  // Clear step markers AND submit-working marks when the active problem
+  // changes so stale results don't linger across problem switches.
   useEffect(() => {
     setStepMarkers([]);
+    setMarkingResults([]);
+    setWorkingBounds(null);
   }, [activeProblemSrc]);
+
+  // Submit the student's handwritten working to the marker API. Captures
+  // just the path-layer region (so the printed problem image isn't sent),
+  // then overlays per-line ticks/crosses on the canvas using the bounds we
+  // captured against.
+  const submitWorking = useCallback(
+    async (analysis: ProblemAnalysis, problemText: string) => {
+      if (!svgRef.current) return;
+      const bounds = getPathLayerBounds();
+      if (!bounds) {
+        console.warn("[submit-working] no path layers to mark");
+        return;
+      }
+
+      setIsMarking(true);
+      setMarkingResults([]);
+
+      try {
+        const capture = await captureWorkingArea(
+          svgRef.current,
+          bounds,
+          camera
+        );
+        if (!capture) {
+          console.warn("[submit-working] capture failed");
+          return;
+        }
+
+        setWorkingBounds(capture.bounds);
+
+        const response = await fetch("/api/mark-working", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            workingImageSrc: capture.dataUrl,
+            solutionSteps: analysis.solution.steps,
+            finalAnswer: analysis.solution.finalAnswer,
+            problemText,
+          }),
+        });
+
+        if (!response.ok) {
+          console.error(
+            "[submit-working] mark-working API failed",
+            response.status
+          );
+          return;
+        }
+
+        const results = (await response.json()) as MarkedLine[] | { error?: string };
+        if (Array.isArray(results)) {
+          setMarkingResults(results);
+        } else {
+          console.error("[submit-working] unexpected response", results);
+        }
+      } catch (err) {
+        console.error("[submit-working] failed", err);
+      } finally {
+        setIsMarking(false);
+      }
+    },
+    [camera, getPathLayerBounds]
+  );
 
   const deleteLayers = useDeleteLayers();
 
@@ -977,6 +1106,10 @@ const handlePointerUp = useCallback((e: React.PointerEvent) => {
             />
           )}
           <StepMarkers steps={stepMarkers} />
+          <MarkingOverlay
+            bounds={workingBounds}
+            results={markingResults}
+          />
         </g>
       </svg>
       <HandwritingOverlay

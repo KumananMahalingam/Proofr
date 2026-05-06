@@ -21,7 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ProgressBar } from "./progress-bar";
 
-type ProblemAnalysis = {
+export type ProblemAnalysis = {
   topic: string;
   concepts: string[];
   hints: [string, string, string];
@@ -43,7 +43,13 @@ interface ProblemPanelProps {
   verificationIsLoading: boolean;
 }
 
-export const ProblemPanel = ({ activeProblemSrc, verificationPercentage, verificationIsCorrect, verificationFeedback, verificationIsLoading }: ProblemPanelProps) => {
+export const ProblemPanel = ({
+  activeProblemSrc,
+  verificationPercentage,
+  verificationIsCorrect,
+  verificationFeedback,
+  verificationIsLoading,
+}: ProblemPanelProps) => {
   const [collapsed, setCollapsed] = useState(false);
   const [hintsExpanded, setHintsExpanded] = useState(true);
   const [isLoading, setIsLoading] = useState(false);

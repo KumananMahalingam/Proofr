@@ -100,6 +100,13 @@ export async function captureCanvas(
       }
     }
 
+    // Mark all embedded <image> elements as CORS-anonymous so the canvas
+    // doesn't get tainted when the SVG is rasterised. Done on the clone
+    // (not the live DOM) so we don't mutate what the user is editing.
+    clone.querySelectorAll("image").forEach((img) => {
+      img.setAttribute("crossorigin", "anonymous");
+    });
+
     const serializer = new XMLSerializer();
     const source = serializer.serializeToString(clone);
 
@@ -107,32 +114,45 @@ export async function captureCanvas(
     const url = URL.createObjectURL(blob);
 
     try {
-      const img = new Image();
-      img.crossOrigin = "anonymous";
-      img.width = outW;
-      img.height = outH;
-
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () =>
-          reject(new Error("Failed to load serialized svg"));
-        img.src = url;
-      });
-
       const canvas = document.createElement("canvas");
       canvas.width = outW;
       canvas.height = outH;
-      const ctx = canvas.getContext("2d");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx) {
         return null;
       }
 
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, outW, outH);
-      ctx.drawImage(img, 0, 0, outW, outH);
 
-      const dataUrl = canvas.toDataURL("image/png");
-      return dataUrl.replace(/^data:image\/png;base64,/, "");
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.width = outW;
+      img.height = outH;
+
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => {
+          // Draw inside onload so we only ever rasterise after the image is
+          // fully loaded with its CORS-anonymous flag honoured.
+          ctx.drawImage(img, 0, 0, outW, outH);
+          resolve();
+        };
+        img.onerror = () =>
+          reject(new Error("Failed to load serialized svg"));
+        img.src = url;
+      });
+
+      try {
+        const dataUrl = canvas.toDataURL("image/png");
+        return dataUrl.replace(/^data:image\/png;base64,/, "");
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "SecurityError") {
+          console.error("[captureCanvas] SecurityError - canvas is tainted");
+        } else {
+          console.error("[captureCanvas] toDataURL failed", e);
+        }
+        return null;
+      }
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -140,4 +160,56 @@ export async function captureCanvas(
     console.error("[captureCanvas] error", e);
     return null;
   }
+}
+
+export interface CaptureWorkingAreaResult {
+  /**
+   * Full data URL (`data:image/png;base64,...`) ready to send to a vision API.
+   */
+  dataUrl: string;
+  /**
+   * The captured region in canvas-space coordinates, with padding already
+   * baked in. Use this to place overlays (e.g. marking ticks) relative to
+   * the same area the model actually saw.
+   */
+  bounds: CanvasBounds;
+}
+
+/**
+ * Capture the region containing the student's handwritten working as a PNG
+ * suitable for sending to a vision model. Returns both the data URL and the
+ * exact bounds (in canvas coords, padded) that were captured, so the caller
+ * can position marking overlays against the same coordinate frame.
+ *
+ * Implementation note: we reuse the same SVG-cloning approach as
+ * `captureCanvas` rather than rasterising the full DOM via html-to-image —
+ * that would also pick up overlay UI (problem panel, toolbar, etc.) and
+ * pulls in a heavy dependency for a job the existing path already handles.
+ */
+export async function captureWorkingArea(
+  // svgElement and camera are accepted for API symmetry / future flexibility
+  // but we drive the capture purely off the SVG selector + bounds, which is
+  // already battle-tested in `captureCanvas`.
+  _svgElement: SVGSVGElement,
+  pathLayerBounds: CanvasBounds,
+  _camera: { x: number; y: number },
+  padding: number = 40
+): Promise<CaptureWorkingAreaResult | null> {
+  const base64 = await captureCanvas({
+    bounds: pathLayerBounds,
+    camera: _camera,
+    padding,
+  });
+
+  if (!base64) return null;
+
+  return {
+    dataUrl: `data:image/png;base64,${base64}`,
+    bounds: {
+      x: pathLayerBounds.x - padding,
+      y: pathLayerBounds.y - padding,
+      width: pathLayerBounds.width + padding * 2,
+      height: pathLayerBounds.height + padding * 2,
+    },
+  };
 }
