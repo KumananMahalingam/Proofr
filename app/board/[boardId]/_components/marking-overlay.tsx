@@ -6,6 +6,7 @@ export interface MarkedLine {
   lineNumber: number;
   content: string;
   yPositionPercent: number;
+  xPositionPercent?: number;
   correct: boolean;
   explanation: string | null;
 }
@@ -16,7 +17,7 @@ interface MarkingOverlayProps {
 }
 
 const ICON_RADIUS = 10;
-const HORIZONTAL_GAP = 48;
+const HORIZONTAL_GAP = 20;
 const TOOLTIP_WIDTH = 240;
 const TOOLTIP_HEIGHT = 56;
 
@@ -32,11 +33,14 @@ export const MarkingOverlay = ({ bounds, results }: MarkingOverlayProps) => {
 
   if (!bounds || results.length === 0) return null;
 
-  const iconX = bounds.x + bounds.width + HORIZONTAL_GAP;
-
   return (
     <g>
       {results.map((result) => {
+        const baseX =
+          bounds.x +
+          bounds.width *
+            (Math.max(0, Math.min(100, result.xPositionPercent ?? 100)) / 100);
+        const iconX = baseX + HORIZONTAL_GAP;
         const iconY =
           bounds.y + (result.yPositionPercent / 100) * bounds.height;
 

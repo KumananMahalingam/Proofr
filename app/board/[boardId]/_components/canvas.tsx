@@ -60,9 +60,16 @@ import { ZoomControls } from "./zoom-controls";
 // 20+ strokes, so the old cap of 100 was being hit during normal use.
 const MAX_LAYERS = 10000;
 const DEFAULT_IMAGE_WIDTH = 400;
+const LINE_GROUP_Y_THRESHOLD = 50;
+const LINE_RIGHT_EDGE_OFFSET = 20;
 
 interface CanvasProps {
   boardId: string;
+};
+
+type StrokeLineAnchor = {
+  y: number;
+  rightX: number;
 };
 
 export const Canvas = ({
@@ -233,6 +240,90 @@ export const Canvas = ({
       width: maxX - minX,
       height: maxY - minY,
     };
+  }, []);
+
+  // Groups stroke layers into approximate handwritten lines by Y proximity.
+  // Each resulting anchor uses:
+  // - average stroke midpoint Y in the group (vertical marker position)
+  // - max stroke right edge X + small offset (horizontal marker position)
+  const getPathLineAnchors = useMutation(({ storage }) => {
+    const liveLayers = storage.get("layers");
+    const liveLayerIds = storage.get("layerIds");
+
+    const strokes: Array<{ midY: number; rightX: number }> = [];
+
+    for (let i = 0; i < liveLayerIds.length; i++) {
+      const id = liveLayerIds.get(i);
+      if (!id) continue;
+      const layer = liveLayers.get(id);
+      if (!layer) continue;
+      if (layer.get("type") !== LayerType.Path) continue;
+
+      const x = layer.get("x");
+      const y = layer.get("y");
+      const w = layer.get("width");
+      const h = layer.get("height");
+      if (
+        typeof x !== "number" ||
+        typeof y !== "number" ||
+        typeof w !== "number" ||
+        typeof h !== "number"
+      ) {
+        continue;
+      }
+
+      strokes.push({
+        midY: y + h / 2,
+        rightX: x + w,
+      });
+    }
+
+    if (strokes.length === 0) return [] as StrokeLineAnchor[];
+
+    strokes.sort((a, b) => a.midY - b.midY);
+
+    type Group = {
+      sumMidY: number;
+      count: number;
+      maxRightX: number;
+    };
+
+    const groups: Group[] = [];
+
+    for (const stroke of strokes) {
+      let selected: Group | null = null;
+      let bestDistance = Number.POSITIVE_INFINITY;
+
+      for (const group of groups) {
+        const groupMidY = group.sumMidY / group.count;
+        const distance = Math.abs(stroke.midY - groupMidY);
+        if (distance <= LINE_GROUP_Y_THRESHOLD && distance < bestDistance) {
+          selected = group;
+          bestDistance = distance;
+        }
+      }
+
+      if (!selected) {
+        groups.push({
+          sumMidY: stroke.midY,
+          count: 1,
+          maxRightX: stroke.rightX,
+        });
+      } else {
+        selected.sumMidY += stroke.midY;
+        selected.count += 1;
+        if (stroke.rightX > selected.maxRightX) {
+          selected.maxRightX = stroke.rightX;
+        }
+      }
+    }
+
+    return groups
+      .map((group) => ({
+        y: group.sumMidY / group.count,
+        rightX: group.maxRightX + LINE_RIGHT_EDGE_OFFSET,
+      }))
+      .sort((a, b) => a.y - b.y);
   }, []);
 
   const insertLayer = useMutation((
@@ -901,6 +992,7 @@ const handlePointerUp = useCallback((e: React.PointerEvent) => {
         console.warn("[submit-working] no path layers to mark");
         return;
       }
+      const lineAnchors = getPathLineAnchors();
 
       setIsMarking(true);
       setMarkingResults([]);
@@ -939,7 +1031,42 @@ const handlePointerUp = useCallback((e: React.PointerEvent) => {
 
         const results = (await response.json()) as MarkedLine[] | { error?: string };
         if (Array.isArray(results)) {
-          setMarkingResults(results);
+          // Remap model results onto geometry-derived line anchors so marker
+          // placement follows the actual handwriting lines:
+          // - group strokes by Y proximity
+          // - use group average midpoint Y
+          // - use group max right X (+offset)
+          const overlayBounds = capture.bounds;
+          const orderedResults = [...results].sort(
+            (a, b) => a.yPositionPercent - b.yPositionPercent
+          );
+
+          const remapped = orderedResults.map((result, idx) => {
+            const anchor = lineAnchors[idx];
+            if (!anchor || overlayBounds.width <= 0 || overlayBounds.height <= 0) {
+              return result;
+            }
+
+            const yPositionPercent = Math.max(
+              0,
+              Math.min(100, ((anchor.y - overlayBounds.y) / overlayBounds.height) * 100)
+            );
+            const xPositionPercent = Math.max(
+              0,
+              Math.min(
+                100,
+                ((anchor.rightX - overlayBounds.x) / overlayBounds.width) * 100
+              )
+            );
+
+            return {
+              ...result,
+              yPositionPercent,
+              xPositionPercent,
+            } as MarkedLine;
+          });
+
+          setMarkingResults(remapped);
         } else {
           console.error("[submit-working] unexpected response", results);
         }
@@ -949,7 +1076,7 @@ const handlePointerUp = useCallback((e: React.PointerEvent) => {
         setIsMarking(false);
       }
     },
-    [camera, getPathLayerBounds]
+    [camera, getPathLayerBounds, getPathLineAnchors]
   );
 
   const deleteLayers = useDeleteLayers();
