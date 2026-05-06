@@ -53,7 +53,6 @@ export const HandwritingOverlay = ({
 }: HandwritingOverlayProps) => {
   const [state, setState] = useState<VerificationState>(DEFAULT_STATE);
   const [problemText, setProblemText] = useState("");
-  const [debugImage, setDebugImage] = useState<string | null>(null);
 
   // Stable refs so async handlers can read the latest values without forcing
   // the recognition effect to re-run on every state/prop tick.
@@ -200,7 +199,6 @@ export const HandwritingOverlay = ({
             : "viewport"
         }`
       );
-      setDebugImage(`data:image/png;base64,${imageBase64}`);
 
       inFlightRef.current = true;
       nextAllowedAtRef.current = Date.now() + MIN_INTERVAL_MS;
@@ -360,19 +358,6 @@ export const HandwritingOverlay = ({
             isCorrect={state.isCorrect}
             feedback={state.feedback}
             isLoading={state.isLoading}
-          />
-        </div>
-      )}
-      {debugImage && (
-        <div className="absolute bottom-4 left-4 pointer-events-auto rounded-lg overflow-hidden border border-white/20 bg-neutral-900/80 shadow-xl">
-          <div className="px-2 py-1 text-[10px] font-medium text-white/60 uppercase tracking-wider">
-            Captured (debug)
-          </div>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={debugImage}
-            alt="Last canvas capture sent to Gemini"
-            className="block w-[180px] h-auto"
           />
         </div>
       )}
