@@ -48,7 +48,7 @@ export const Info = ({
           <Link href="/">
             <Image
               src="/logo.svg"
-              alt="Board logo"
+              alt="Proofr logo"
               height={40}
               width={40}
             />
@@ -56,7 +56,7 @@ export const Info = ({
               "font-bold text-xl ml-2 text-white",
               font.className,
             )}>
-              Board
+              Proofr
             </span>
           </Link>
         </Button>

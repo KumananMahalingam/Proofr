@@ -18,7 +18,7 @@ export const EmptyOrg = () => {
         width={200}
       />
       <h2 className="text-2xl font-semibold mt-6">
-        Welcome to Board
+        Welcome to Proofr
       </h2>
       <p className="text-muted-foreground text-sm mt-2">
         Create an organization to get started
