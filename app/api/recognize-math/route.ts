@@ -54,12 +54,15 @@ const normaliseSteps = (raw: unknown): StepResult[] => {
     if (!item || typeof item !== "object") continue;
     const s = item as Record<string, unknown>;
     const yNum = Number(s.y);
-    if (!Number.isFinite(yNum)) continue;
     const xNum = Number(s.x);
+    // Keep every step, even if the model omits coordinates: the client now
+    // positions markers geometrically from the actual strokes, using these
+    // coords only as a fallback. Default x to the right edge (0.95) and y to
+    // the top (0) when missing.
     result.push({
       label: typeof s.label === "string" ? s.label : "",
-      x: Number.isFinite(xNum) ? Math.max(0, Math.min(1, xNum)) : 0.05,
-      y: Math.max(0, Math.min(1, yNum)),
+      x: Number.isFinite(xNum) ? Math.max(0, Math.min(1, xNum)) : 0.95,
+      y: Number.isFinite(yNum) ? Math.max(0, Math.min(1, yNum)) : 0,
       isCorrect: typeof s.isCorrect === "boolean" ? s.isCorrect : true,
       issue: typeof s.issue === "string" ? s.issue : "",
     });
@@ -67,9 +70,9 @@ const normaliseSteps = (raw: unknown): StepResult[] => {
   return result;
 };
 
-const SYSTEM_PROMPT = `You are a math teacher reviewing a student's handwritten working on a digital whiteboard.
+const SYSTEM_PROMPT = `You are a patient, encouraging math teacher reviewing a student's handwritten working on a digital whiteboard.
 
-The image shows the math problem (printed) and the student's handwritten ink strokes (their working out, top to bottom).
+The image shows the math problem (printed) and the student's handwritten ink strokes (their working out, written top to bottom).
 
 Your job: identify each distinct STEP the student has written (each separate line of working / each equation) and evaluate it.
 
@@ -82,8 +85,6 @@ Respond ONLY with a JSON object in this exact shape (no markdown fences, no prea
   "steps": [
     {
       "label": "concise text of this step (e.g. '3x + 5 = 14')",
-      "x": number from 0.0 to 1.0,
-      "y": number from 0.0 to 1.0,
       "isCorrect": true or false,
       "issue": "if incorrect: one short sentence explaining the error. If correct: empty string."
     }
@@ -92,18 +93,30 @@ Respond ONLY with a JSON object in this exact shape (no markdown fences, no prea
 
 Rules for the "steps" array:
 - One entry per distinct line of HANDWRITTEN working. Do NOT include the printed problem itself as a step.
-- Order entries top-to-bottom.
-- "x" is the approximate horizontal position of the END of that line (right side), as a fraction of the image width (0.0 = left edge, 1.0 = right edge).
-- "y" is the approximate vertical center of that line, as a fraction of the image height (0.0 = top, 1.0 = bottom).
+- Order entries strictly top-to-bottom, matching the visual order of the handwritten lines. This ordering is critical — the marks are placed on each line by position in this array.
 - "isCorrect" reflects whether this specific step is mathematically valid given the previous steps.
 - If the student has written nothing handwritten, return an empty steps array.
+
+Reading the handwriting carefully:
+- Handwritten math is messy. Read each line charitably and in the context of the problem and the previous lines.
+- Watch for easily-confused characters: 7 vs 1, t vs +, x vs ×, 5 vs S, 0 vs O, 2 vs z. Use the surrounding equation to disambiguate.
+- If a line is a valid algebraic consequence of the line above it (or of the original problem), it is CORRECT, even if the student skipped intermediate steps or started partway through.
+
+When to mark a step INCORRECT (be conservative — only flag genuine mistakes):
+- Mark incorrect ONLY when there is a clear, unambiguous mathematical error (e.g. wrong arithmetic, invalid algebra, sign error).
+- Do NOT mark incorrect for: skipped steps, starting midway, unconventional but valid rearrangements, or messy-but-plausible handwriting.
+- If you are unsure whether a line is wrong or just hard to read, give the student the benefit of the doubt and mark it CORRECT.
+
+Detecting the final answer:
+- A line that isolates the unknown (e.g. "t = 1", "x = 3") is the final answer.
+- If that value is correct for the problem, the working is complete: set the top-level "isCorrect" to true and "percentage" to 100, and mark that final-answer step isCorrect = true.
 
 Guidance for percentage:
 - 0  = nothing meaningful written yet
 - 25 = first useful step is on the page
 - 50 = halfway through the working
 - 75 = nearly at the answer
-- 100 = correct final answer is written
+- 100 = a correct final answer (e.g. "x = ...") is written
 
 Even if the handwriting is messy or partial, ALWAYS produce your best guess. Never refuse.`;
 

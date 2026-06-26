@@ -72,6 +72,12 @@ type StrokeLineAnchor = {
   rightX: number;
 };
 
+export type { StrokeLineAnchor };
+
+// Radius (in canvas units) of the object-eraser hit region. Any pen stroke
+// whose bounding box comes within this distance of the cursor is removed.
+const ERASER_RADIUS = 14;
+
 export const Canvas = ({
   boardId,
 }: CanvasProps) => {
@@ -115,6 +121,10 @@ export const Canvas = ({
   });
   const [stepMarkers, setStepMarkers] = useState<CanvasStepMarker[]>([]);
 
+  // Canvas-space position of the eraser cursor, used to render a hollow ring
+  // showing the eraser's reach while the Eraser tool is active.
+  const [eraserCursor, setEraserCursor] = useState<Point | null>(null);
+
   // --- Submit Working state ---------------------------------------------
   // markingResults: per-line marks returned by the vision model.
   // workingBounds: the canvas-space rect that was captured (with padding),
@@ -141,6 +151,15 @@ export const Canvas = ({
 
   const onStepsChange = useCallback((steps: CanvasStepMarker[]) => {
       setStepMarkers(steps);
+  }, []);
+
+  // Wipe any existing marks (live step markers + submit-working results).
+  // Used when the geometry changes underneath them (e.g. erasing) so stale
+  // ticks/crosses don't linger at positions that no longer match the work.
+  const clearStaleMarks = useCallback(() => {
+      setStepMarkers([]);
+      setMarkingResults([]);
+      setWorkingBounds(null);
   }, []);
 
  
@@ -587,6 +606,72 @@ export const Canvas = ({
     })
   }, [lastUsedColor]);
 
+  // Object-eraser: deletes any pen stroke (Path layer) whose bounding box is
+  // within ERASER_RADIUS of the cursor. Deliberately skips non-Path layers so
+  // the printed problem image, notes, etc. can't be wiped out by accident.
+  // Returns true when at least one stroke was removed.
+  const eraseAtPoint = useMutation((
+    { storage, self, setMyPresence },
+    point: Point,
+  ) => {
+    const liveLayers = storage.get("layers");
+    const liveLayerIds = storage.get("layerIds");
+
+    const idsToDelete: string[] = [];
+
+    for (let i = 0; i < liveLayerIds.length; i++) {
+      const id = liveLayerIds.get(i);
+      if (!id) continue;
+      const layer = liveLayers.get(id);
+      if (!layer) continue;
+      if (layer.get("type") !== LayerType.Path) continue;
+
+      const x = layer.get("x");
+      const y = layer.get("y");
+      const w = layer.get("width");
+      const h = layer.get("height");
+      if (
+        typeof x !== "number" ||
+        typeof y !== "number" ||
+        typeof w !== "number" ||
+        typeof h !== "number"
+      ) {
+        continue;
+      }
+
+      // Treat the cursor as a circle of ERASER_RADIUS and test it against the
+      // stroke's bounding box (inflated by the radius).
+      if (
+        point.x + ERASER_RADIUS > x &&
+        point.x - ERASER_RADIUS < x + w &&
+        point.y + ERASER_RADIUS > y &&
+        point.y - ERASER_RADIUS < y + h
+      ) {
+        idsToDelete.push(id);
+      }
+    }
+
+    if (idsToDelete.length === 0) return false;
+
+    for (const id of idsToDelete) {
+      const index = liveLayerIds.indexOf(id);
+      if (index !== -1) {
+        liveLayerIds.delete(index);
+      }
+      liveLayers.delete(id);
+    }
+
+    // Drop any erased strokes from the current selection.
+    const selection = self.presence.selection;
+    if (selection.some((id) => idsToDelete.includes(id))) {
+      setMyPresence({
+        selection: selection.filter((id) => !idsToDelete.includes(id)),
+      });
+    }
+
+    return true;
+  }, []);
+
   const resizeSelectedLayer = useMutation((
     { storage, self },
     point: Point,
@@ -804,6 +889,13 @@ export const Canvas = ({
       resizeSelectedLayer(current);
     } else if (canvasState.mode === CanvasMode.Pencil) {
       continueDrawing(current, e);
+    } else if (canvasState.mode === CanvasMode.Eraser) {
+      setEraserCursor(current);
+      if (e.buttons === 1) {
+        if (eraseAtPoint(current)) {
+          clearStaleMarks();
+        }
+      }
     }
 
     setMyPresence({ cursor: current });
@@ -816,10 +908,13 @@ export const Canvas = ({
     translateSelectedLayers,
     startMultiSelection,
     updateSelectionNet,
+    eraseAtPoint,
+    clearStaleMarks,
   ]);
 
   const onPointerLeave = useMutation(({ setMyPresence }) => {
     setMyPresence({ cursor: null });
+    setEraserCursor(null);
   }, []);
 
   const onDragOver = useCallback((e: React.DragEvent<SVGSVGElement>) => {
@@ -867,8 +962,17 @@ export const Canvas = ({
       return;
     }
 
+    if (canvasState.mode === CanvasMode.Eraser) {
+      history.pause();
+      setEraserCursor(point);
+      if (eraseAtPoint(point)) {
+        clearStaleMarks();
+      }
+      return;
+    }
+
     setCanvasState({ origin: point, mode: CanvasMode.Pressing });
-  }, [camera, canvasState.mode, setCanvasState, startDrawing]);
+  }, [camera, canvasState.mode, setCanvasState, startDrawing, history, eraseAtPoint, clearStaleMarks]);
 
   const onPointerUp = useMutation((
     {},
@@ -892,6 +996,10 @@ export const Canvas = ({
       });
     } else if (canvasState.mode === CanvasMode.Inserting) {
       insertLayer(canvasState.layerType, point);
+    } else if (canvasState.mode === CanvasMode.Eraser) {
+      // Strokes were removed; re-run recognition so the remaining work gets
+      // re-marked with fresh, correctly-positioned ticks/crosses.
+      setStrokeEndTick((t) => t + 1);
     } else {
       setCanvasState({
         mode: CanvasMode.None,
@@ -1163,6 +1271,9 @@ const handlePointerUp = useCallback((e: React.PointerEvent) => {
       <svg
         ref={svgRef}
         className="h-[100vh] w-[100vw]"
+        style={{
+          cursor: canvasState.mode === CanvasMode.Eraser ? "none" : undefined,
+        }}
         onPointerMove={onPointerMove}
         onPointerLeave={onPointerLeave}
         onPointerDown={onPointerDown}
@@ -1237,6 +1348,16 @@ const handlePointerUp = useCallback((e: React.PointerEvent) => {
             bounds={workingBounds}
             results={markingResults}
           />
+          {canvasState.mode === CanvasMode.Eraser && eraserCursor && (
+            <circle
+              cx={eraserCursor.x}
+              cy={eraserCursor.y}
+              r={ERASER_RADIUS}
+              className="fill-white/40 stroke-neutral-500"
+              strokeWidth={1.5 / camera.zoom}
+              pointerEvents="none"
+            />
+          )}
         </g>
       </svg>
       <HandwritingOverlay
@@ -1247,6 +1368,7 @@ const handlePointerUp = useCallback((e: React.PointerEvent) => {
         onStrokeEnd={strokeEndTick}
         camera={camera}
         computeLayerBounds={computeLayerBounds}
+        getPathLineAnchors={getPathLineAnchors}
       />
     </main>
   );

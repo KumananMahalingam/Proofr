@@ -3,6 +3,7 @@
 import { ChangeEvent, useRef } from "react";
 import { 
   Circle, 
+  Eraser,
   ImagePlus,
   MousePointer2, 
   Pencil, 
@@ -126,6 +127,16 @@ export const Toolbar = ({
           })}
           isActive={
             canvasState.mode === CanvasMode.Pencil
+          }
+        />
+        <ToolButton
+          label="Eraser"
+          icon={Eraser}
+          onClick={() => setCanvasState({
+            mode: CanvasMode.Eraser,
+          })}
+          isActive={
+            canvasState.mode === CanvasMode.Eraser
           }
         />
         <input

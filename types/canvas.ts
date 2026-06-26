@@ -122,6 +122,9 @@ export type CanvasState =
       mode: CanvasMode.Pencil,
     }
   | {
+      mode: CanvasMode.Eraser,
+    }
+  | {
       mode: CanvasMode.Pressing,
       origin: Point;
     }
@@ -139,6 +142,7 @@ export enum CanvasMode {
   Inserting,
   Resizing,
   Pencil,
+  Eraser,
 };
 
 export type Layer =

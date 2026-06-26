@@ -23,6 +23,14 @@ export interface CanvasStepMarker {
   issue: string;
 }
 
+// Vertical centre + right edge of a handwritten line, derived geometrically
+// from the actual pen strokes (mirrors the shape produced by
+// getPathLineAnchors in canvas.tsx).
+type StrokeLineAnchor = {
+  y: number;
+  rightX: number;
+};
+
 interface HandwritingOverlayProps {
   activeProblemSrc: string | null;
   canvasState: CanvasState;
@@ -31,6 +39,7 @@ interface HandwritingOverlayProps {
   onStrokeEnd: number | null;
   camera: { x: number; y: number };
   computeLayerBounds: () => CanvasBounds | null;
+  getPathLineAnchors: () => StrokeLineAnchor[];
 }
 
 // Same default as the capture function — keep in sync.
@@ -50,6 +59,7 @@ export const HandwritingOverlay = ({
   onStrokeEnd,
   camera,
   computeLayerBounds,
+  getPathLineAnchors,
 }: HandwritingOverlayProps) => {
   const [state, setState] = useState<VerificationState>(DEFAULT_STATE);
   const [problemText, setProblemText] = useState("");
@@ -83,6 +93,11 @@ export const HandwritingOverlay = ({
   useEffect(() => {
     computeLayerBoundsRef.current = computeLayerBounds;
   }, [computeLayerBounds]);
+
+  const getPathLineAnchorsRef = useRef(getPathLineAnchors);
+  useEffect(() => {
+    getPathLineAnchorsRef.current = getPathLineAnchors;
+  }, [getPathLineAnchors]);
 
   // Single source of truth: any time local state moves, push the same snapshot
   // to the parent so the side-panel ProgressBar updates in lock-step with the
@@ -192,6 +207,11 @@ export const HandwritingOverlay = ({
       // strokes have shifted the bounds in the meantime.
       const captureBounds = bounds;
 
+      // Snapshot the geometric line anchors (right edge + vertical centre of
+      // each handwritten line) so we can glue markers to the actual strokes
+      // instead of relying on the model's coordinate guesses.
+      const lineAnchors = getPathLineAnchorsRef.current();
+
       console.log(
         `[handwriting] captured image, base64 length=${imageBase64.length}, bounds=${
           bounds
@@ -266,23 +286,40 @@ export const HandwritingOverlay = ({
           const vbW = captureBounds.width + CAPTURE_PADDING * 2;
           const vbH = captureBounds.height + CAPTURE_PADDING * 2;
 
+          // Prefer geometric placement: each step (ordered top-to-bottom by the
+          // model) maps to the corresponding handwritten line anchor — the
+          // right edge + vertical centre of the real strokes on that line. This
+          // keeps the tick/cross glued to the actual line instead of trusting
+          // the model's unreliable coordinate guesses. We only fall back to the
+          // model's normalised coords when there's no matching stroke anchor
+          // (e.g. the step is typed text rather than ink).
           const markers: CanvasStepMarker[] = data.steps
-            .filter(
-              (s) =>
-                s &&
-                typeof s.y === "number" &&
-                Number.isFinite(s.y)
-            )
+            .filter((s) => s && typeof s === "object")
             .map((s, idx) => {
-              const nx =
-                typeof s.x === "number" && Number.isFinite(s.x)
-                  ? Math.max(0, Math.min(1, s.x))
-                  : 0.95;
-              const ny = Math.max(0, Math.min(1, s.y as number));
+              const anchor = lineAnchors[idx];
+
+              let mx: number;
+              let my: number;
+              if (anchor) {
+                mx = anchor.rightX;
+                my = anchor.y;
+              } else {
+                const nx =
+                  typeof s.x === "number" && Number.isFinite(s.x)
+                    ? Math.max(0, Math.min(1, s.x))
+                    : 0.95;
+                const ny =
+                  typeof s.y === "number" && Number.isFinite(s.y)
+                    ? Math.max(0, Math.min(1, s.y))
+                    : 1;
+                mx = vbX + nx * vbW;
+                my = vbY + ny * vbH;
+              }
+
               return {
                 id: `step-${idx}`,
-                x: vbX + nx * vbW,
-                y: vbY + ny * vbH,
+                x: mx,
+                y: my,
                 isCorrect: s.isCorrect ?? true,
                 label: typeof s.label === "string" ? s.label : "",
                 issue: typeof s.issue === "string" ? s.issue : "",
