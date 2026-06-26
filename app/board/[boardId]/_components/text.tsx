@@ -1,5 +1,6 @@
 import { Kalam } from "next/font/google";
 import ContentEditable, { ContentEditableEvent } from "react-contenteditable";
+import { LiveObject } from "@liveblocks/client";
 
 import { TextLayer } from "@/types/canvas";
 import { cn, colorToCss } from "@/lib/utils";
@@ -44,7 +45,7 @@ export const Text = ({
   ) => {
     const liveLayers = storage.get("layers");
 
-    liveLayers.get(id)?.set("value", newValue);
+    (liveLayers.get(id) as LiveObject<TextLayer> | undefined)?.set("value", newValue);
   }, []);
 
   const handleContentChange = (e: ContentEditableEvent) => {

@@ -69,7 +69,6 @@ export const StepMarkers = ({ steps }: StepMarkersProps) => {
               style={{ overflow: "visible" }}
             >
               <div
-                xmlns="http://www.w3.org/1999/xhtml"
                 style={{
                   display: "flex",
                   alignItems: "center",

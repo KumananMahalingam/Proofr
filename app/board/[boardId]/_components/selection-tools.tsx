@@ -3,8 +3,16 @@
 import { memo } from "react";
 import { BringToFront, SendToBack, Trash2 } from "lucide-react";
 
+import { LiveObject } from "@liveblocks/client";
+
 import { Hint } from "@/components/hint";
-import { Camera, Color } from "@/types/canvas";
+import {
+  Camera,
+  Color,
+  Layer,
+  LayerType,
+  ImageLayer,
+} from "@/types/canvas";
 import { Button } from "@/components/ui/button";
 import { useMutation, useSelf } from "@/liveblocks.config";
 import { useDeleteLayers } from "@/hooks/use-delete-layers";
@@ -29,7 +37,7 @@ export const SelectionTools = memo(({
     const liveLayerIds = storage.get("layerIds");
     const indices: number[] = [];
 
-    const arr = liveLayerIds.toImmutable();
+    const arr = liveLayerIds.map((id) => id);
 
     for (let i = 0; i < arr.length; i++) {
       if (selection.includes(arr[i])) {
@@ -51,7 +59,7 @@ export const SelectionTools = memo(({
     const liveLayerIds = storage.get("layerIds");
     const indices: number[] = [];
 
-    const arr = liveLayerIds.toImmutable();
+    const arr = liveLayerIds.map((id) => id);
 
     for (let i = 0; i < arr.length; i++) {
       if (selection.includes(arr[i])) {
@@ -72,7 +80,14 @@ export const SelectionTools = memo(({
     setLastUsedColor(fill);
 
     selection.forEach((id) => {
-      liveLayers.get(id)?.set("fill", fill);
+      const layer = liveLayers.get(id);
+
+      // Image layers have no fill, so skip them.
+      if (!layer || layer.get("type") === LayerType.Image) {
+        return;
+      }
+
+      (layer as LiveObject<Exclude<Layer, ImageLayer>>).set("fill", fill);
     })
   }, [selection, setLastUsedColor]);
 
