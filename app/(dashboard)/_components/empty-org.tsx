@@ -21,13 +21,13 @@ export const EmptyOrg = () => {
         Welcome to Proofr
       </h2>
       <p className="text-muted-foreground text-sm mt-2">
-        Create an organization to get started
+        Create a workspace to get started
       </p>
       <div className="mt-6">
         <Dialog>
           <DialogTrigger asChild>
             <Button size="lg">
-              Create organization
+              Create workspace
             </Button>
           </DialogTrigger>
           <DialogContent className="p-0 bg-transparent border-none max-w-[480px]">
