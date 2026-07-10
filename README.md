@@ -1,6 +1,6 @@
-```
-
 ![Alt Text](public/demo.png)
+
+```
 
 ### Install packages
 
