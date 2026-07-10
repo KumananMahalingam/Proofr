@@ -1,4 +1,4 @@
-Try It Out: [Live Demo](proofr.vercel.app)
+Try It Out: [![Vercel Deployment](proofr.vercel.app)](proofr.vercel.app)
 
 ![Alt Text](public/demo.png)
 
