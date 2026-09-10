@@ -8,6 +8,10 @@ chatbot just hands you the solution so you stop learning. Proofr sits in between
 handwrite your working on an infinite canvas, and each line gets marked correct or
 incorrect in real time, with a short explanation when something's off.
 
+Try It Out: proofr.vercel.app
+
+![Alt Text](public/demo.png)
+
 ---
 
 ## Features
@@ -150,6 +154,51 @@ the benefit of the doubt on messy handwriting.
 
 ## Architecture
 
+<<<<<<< HEAD
+=======
+```
+Pen stroke ends
+      │
+      ▼
+insertPath() ──────────► Liveblocks storage (PathLayer)
+      │
+      ▼
+strokeEndTick++  ──►  HandwritingOverlay (debounce + rate limit)
+                            │
+                            ├─► captureCanvas()  → SVG clone → PNG
+                            │
+                            ├─► POST /api/recognize-math  → Groq vision
+                            │        returns ordered per-line verdicts
+                            │
+                            └─► getPathLineAnchors()
+                                     provides real line positions
+                                              │
+                                              ▼
+                                    StepMarkers (inside camera <g>)
+```
+
+### Project layout
+
+```
+app/
+  (dashboard)/          Board list, workspace sidebar, search, favorites
+  board/[boardId]/      Canvas and all its overlays
+  api/                  AI + upload routes (server-side only)
+convex/                 Schema, queries, mutations for board metadata
+lib/                    Geometry helpers, canvas capture
+types/canvas.ts         Layer, CanvasMode, CanvasState definitions
+liveblocks.config.ts    Presence + Storage type declarations
+```
+
+---
+
+## Getting started
+
+### Prerequisites
+
+Node 18+, plus accounts for Convex, Clerk, Liveblocks, Groq, and Google AI Studio.
+
+>>>>>>> 8f9ecd9034d17d1992ffc0877628abb2e0a4ceb2
 ```
 Pen stroke ends
       │
