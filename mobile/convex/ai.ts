@@ -1,22 +1,18 @@
 "use node";
 
 /**
- * Replaces `app/api/extract-math/route.ts` and `app/api/analyse-problem/route.ts`.
+ * AI actions: problem extraction, tutoring analysis, and live step marking.
  *
- * Expo has no server, so these move into Convex actions. API keys stay on the
- * Convex deployment and never reach the device — the same reason the web version
- * kept them in route handlers rather than the browser.
+ * Replaces `app/api/extract-math`, `app/api/analyse-problem`, and
+ * `app/api/recognize-math` from the web app. Expo has no server, so these run as
+ * Convex actions with the API keys held on the deployment, never on the device.
  *
- * One deliberate improvement over the web version: `extractMath` takes a Convex
- * storage id and reads the image server-side. The web route accepted a base64
- * data URL in the request body, which meant the whole image travelled browser ->
- * server on every call. Since mobile already uploads to Convex storage, the bytes
- * are on the backend before analysis starts.
+ * The per-task model split is deliberate and carried over from the web app,
+ * because each step has genuinely different requirements:
  *
- * The per-task model split is carried over from the web app, because each step
- * has genuinely different requirements:
- *   extractMath     -> Gemini 3.8 Flash        (vision OCR of printed math)
- *   analyseProblem  -> gpt-oss-120b on Groq    (text reasoning, no vision needed)
+ *   extractMath     -> Gemini 3.8 Flash      vision OCR of printed math
+ *   analyseProblem  -> gpt-oss-120b on Groq  text reasoning, no vision needed
+ *   recognizeMath   -> Qwen 3.8 27B on Groq  vision, latency-critical per stroke
  *
  * Required Convex environment variables:
  *   npx convex env set GEMINI_API_KEY <key>
@@ -26,34 +22,47 @@ import { v } from "convex/values";
 
 import { action } from "./_generated/server";
 
-/**
- * Model IDs, kept together so they are easy to review and bump.
- *
- * `GEMINI_VISION_MODEL` is upgraded from the web app's `gemini-2.5-flash`.
- *
- * `GROQ_TEXT_MODEL` replaces `llama-3.3-70b-versatile`, which Groq deprecated in
- * June 2026 and shut down for free and developer tiers in August 2026 — so the
- * ported route would have been calling a dead model.
- *
- * Important for the marking pipeline that is still to be ported: `gpt-oss-120b`
- * is TEXT ONLY. It cannot replace Llama 4 Scout in `recognize-math` or
- * `mark-working`, both of which send canvas screenshots. Those need a vision
- * model — see the note at the bottom of this file.
- */
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+/** Upgraded from the web app's `gemini-2.5-flash`. */
 const GEMINI_VISION_MODEL = "gemini-3.8-flash";
 
 /**
- * Used only when the primary model returns a retryable error.
- *
- * `gemini-3.8-flash` is the newest Flash model and returns 503 UNAVAILABLE
- * ("experiencing high demand") under load. A slightly older GA model is usually
- * available when the newest one is saturated, and for OCR of printed math the
- * accuracy difference is small — far smaller than the difference between a result
- * and an error.
+ * Used only when the primary model returns a retryable error. The newest Flash
+ * model is the most contended and returns 503 UNAVAILABLE under load; an older
+ * GA model is usually free, and for OCR of printed math the accuracy difference
+ * is far smaller than the difference between a result and an error.
  */
 const GEMINI_FALLBACK_MODEL = "gemini-3.6-flash";
 
+/**
+ * Replaces `llama-3.3-70b-versatile`, which Groq deprecated in June 2026 and shut
+ * down for free and developer tiers that August. Text only — cannot be used for
+ * the vision routes.
+ */
 const GROQ_TEXT_MODEL = "openai/gpt-oss-120b";
+
+/**
+ * Vision model for per-stroke marking, replacing the deprecated
+ * `meta-llama/llama-4-scout-17b-16e-instruct`.
+ *
+ * Confirmed vision-capable by probing this account's key directly: Groq's
+ * /models endpoint does not report modality, and both Qwen builds accept
+ * OpenAI-style `image_url` content parts and answer, whereas text-only models on
+ * the account reject the request with "content must be a string".
+ *
+ * Keeping this path on Groq preserves the reason the web app chose Groq here in
+ * the first place: recognition fires after every stroke, so inference latency
+ * matters more than peak accuracy.
+ */
+const GROQ_VISION_MODEL = "qwen/qwen3.8-27b";
+const GROQ_VISION_FALLBACK_MODEL = "qwen/qwen3.6-27b";
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 /** Upstream statuses worth retrying: rate limits and transient server errors. */
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
@@ -63,9 +72,9 @@ type UpstreamError = Error & { status?: number; retryable?: boolean };
 /**
  * POST with exponential backoff on retryable statuses.
  *
- * Kept deliberately small — Convex actions have a wall-clock budget, and the user
- * is staring at a spinner, so this is a few hundred milliseconds of patience
- * rather than a serious retry policy.
+ * Deliberately small: a Convex action has a wall-clock budget and the user is
+ * watching a spinner, so this is a few hundred milliseconds of patience rather
+ * than a serious retry policy.
  */
 async function postWithRetry(
   url: string,
@@ -99,10 +108,9 @@ async function postWithRetry(
 }
 
 /**
- * Turns a provider error body into something worth showing a student.
- *
- * The raw body is a wall of JSON; the panel renders `error.message` directly, so
- * dumping it there is useless to the person holding the phone.
+ * Turns a provider error body into something worth showing a student. The panel
+ * renders `error.message` directly, so a wall of provider JSON is useless to the
+ * person holding the phone.
  */
 function describeUpstreamFailure(status: number, body: string): string {
   if (status === 429) {
@@ -115,7 +123,6 @@ function describeUpstreamFailure(status: number, body: string): string {
     return "AI provider rejected the API key. Check the Convex environment variables.";
   }
 
-  // Surface the provider message when there is one, but keep it short.
   try {
     const parsed = JSON.parse(body) as { error?: { message?: string } };
     if (parsed.error?.message) return parsed.error.message;
@@ -138,10 +145,34 @@ function parseJsonLoose<T>(raw: string): T {
   return JSON.parse(cleaned) as T;
 }
 
+/** Tolerates raw JSON, fenced JSON, or JSON embedded in prose. */
+function parseJsonFromText(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const cleaned = raw
+      .trim()
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/, "")
+      .trim();
+
+    const match = cleaned.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+        // fall through
+      }
+    }
+    return JSON.parse(cleaned);
+  }
+}
+
 /**
- * Strips LaTeX that renders badly as plain text. Carried over verbatim from the
- * web route — the extracted string is displayed in a monospace block, not
- * typeset, so table rules and environments are noise.
+ * Strips LaTeX that renders badly as plain text. Verbatim from the web route —
+ * the extracted string is shown in a monospace block, not typeset, so table
+ * rules and environments are noise.
  */
 function cleanLatex(latex: string): string {
   return latex
@@ -155,15 +186,25 @@ function cleanLatex(latex: string): string {
     .trim();
 }
 
+// ---------------------------------------------------------------------------
+// extractMath
+// ---------------------------------------------------------------------------
+
 export const extractMath = action({
   args: { storageId: v.id("_storage") },
-  handler: async (ctx, { storageId }): Promise<{ text: string; latex: string }> => {
+  handler: async (
+    ctx,
+    { storageId }
+  ): Promise<{ text: string; latex: string }> => {
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) throw new Error("Unauthorized");
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
 
+    // Read the image server-side. The web route accepted a base64 data URL in
+    // the request body; since mobile already uploads to Convex storage, the bytes
+    // are on the backend before analysis starts.
     const blob = await ctx.storage.get(storageId);
     if (!blob) throw new Error("Image not found in storage");
 
@@ -203,8 +244,8 @@ export const extractMath = action({
       response = await callGemini(GEMINI_VISION_MODEL);
     } catch (error) {
       // Only fall back for transient failures. A bad key or malformed request
-      // will fail identically on the secondary model, so retrying there just
-      // doubles the latency before showing the same error.
+      // fails identically on the secondary model, so retrying there just doubles
+      // the latency before showing the same error.
       const upstream = error as UpstreamError;
       if (!upstream.retryable) throw error;
 
@@ -229,6 +270,10 @@ export const extractMath = action({
     };
   },
 });
+
+// ---------------------------------------------------------------------------
+// analyseProblem
+// ---------------------------------------------------------------------------
 
 export type ProblemAnalysis = {
   topic: string;
@@ -300,33 +345,275 @@ export const analyseProblem = action({
   },
 });
 
+// ---------------------------------------------------------------------------
+// recognizeMath — live step marking
+// ---------------------------------------------------------------------------
+
+export type StepResult = {
+  label: string;
+  /** Normalised fallback coords. The client prefers real stroke geometry. */
+  x: number;
+  y: number;
+  isCorrect: boolean;
+  issue: string;
+};
+
+export type RecognizeResult = {
+  latex: string;
+  isCorrect: boolean;
+  percentage: number;
+  feedback: string;
+  steps: StepResult[];
+  rateLimited?: boolean;
+  retryAfterSeconds?: number;
+};
+
+/**
+ * Returned instead of throwing, on every failure path.
+ *
+ * This is the web app's design rule and it matters more here than anywhere else:
+ * recognition fires while the student is drawing, so a failed call must never
+ * interrupt the canvas. A bad response degrades the marking overlay, full stop.
+ */
+const RECOGNIZE_FALLBACK: RecognizeResult = {
+  latex: "",
+  isCorrect: true,
+  percentage: 0,
+  feedback: "",
+  steps: [],
+};
+
+/**
+ * Every step is kept even when the model omits coordinates, because the client
+ * positions markers from real stroke geometry and only falls back to these.
+ * Order is what actually matters — markers map to lines by index.
+ */
+function normaliseSteps(raw: unknown): StepResult[] {
+  if (!Array.isArray(raw)) return [];
+
+  const result: StepResult[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const step = item as Record<string, unknown>;
+
+    const x = Number(step.x);
+    const y = Number(step.y);
+
+    result.push({
+      label: typeof step.label === "string" ? step.label : "",
+      x: Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0.95,
+      y: Number.isFinite(y) ? Math.max(0, Math.min(1, y)) : 0,
+      isCorrect: typeof step.isCorrect === "boolean" ? step.isCorrect : true,
+      issue: typeof step.issue === "string" ? step.issue : "",
+    });
+  }
+  return result;
+}
+
+/**
+ * Verbatim from `app/api/recognize-math/route.ts`.
+ *
+ * Do not casually edit. Per the web app's README these instructions were tuned
+ * against real failures — early versions were written around equation solving and
+ * mis-marked proofs badly, flagging scaffolding lines like "When n=1" as wrong
+ * because they are not standalone equations.
+ */
+const RECOGNIZE_SYSTEM_PROMPT = `You are a patient, encouraging math teacher reviewing a student's handwritten working on a digital whiteboard.
+
+The image shows the math problem and the student's handwritten ink strokes (their working out, written top to bottom). The problem may be printed text or may itself be handwritten.
+
+Your job: identify each distinct STEP the student has written (each separate line of working) and evaluate the work as a coherent whole.
+
+Respond ONLY with a JSON object in this exact shape (no markdown fences, no preamble, no commentary):
+{
+  "latex": "the student's most recent step as LaTeX (best guess)",
+  "isCorrect": true or false,
+  "percentage": integer 0-100 reflecting overall progress,
+  "feedback": "one short, encouraging sentence of overall feedback",
+  "steps": [
+    {
+      "label": "concise text of this step (e.g. 'When n=1' or '3x + 5 = 14')",
+      "isCorrect": true or false,
+      "issue": "if incorrect: one short sentence explaining the error. If correct: empty string."
+    }
+  ]
+}
+
+Rules for the "steps" array:
+- One entry per distinct line of HANDWRITTEN working. Do NOT include the printed problem itself as a step.
+- Order entries strictly top-to-bottom, matching the visual order of the handwritten lines. This ordering is critical \u2014 the marks are placed on each line by position in this array.
+- If the student has written nothing handwritten, return an empty steps array.
+
+READ THE WHOLE PAGE FIRST, THEN EVALUATE:
+- Before judging any line, read every line top-to-bottom and work out what kind of solution this is and where the student is heading. Common types: solving an equation, an algebraic derivation, or a PROOF (induction, contradiction, direct proof, etc.).
+- Evaluate each line IN THE CONTEXT of the lines around it and the overall strategy. A line is correct if it is a sensible part of a valid overall argument, even if it is not a self-contained equation.
+- Do not demand that the student start from the beginning or include every intermediate step.
+
+PROOFS (very important \u2014 do not treat proof lines as standalone equations):
+- Recognise proof scaffolding and narrative lines and treat them as CORRECT as long as they are reasonable. Examples: "When n=1", "Base case:", "Assume true for n=k", "Inductive hypothesis", "\u2234 true for n=1", "Therefore...", "Let ...", "Suppose ...". These are structure, not equations \u2014 never mark them incorrect for "not being an equation".
+- For INDUCTION specifically: the student typically (1) checks a base case, (2) assumes the statement for n=k (inductive hypothesis), (3) proves it for n=k+1. Judge each piece by whether it is a valid part of that structure.
+- A correct base-case check (e.g. for "2^n > n": "when n=1, 2^1 = 2 and 2 > 1, so true for n=1") is CORRECT. Mark it correct.
+- Only mark a proof line incorrect if it states something mathematically false (e.g. a wrong base-case computation, an invalid algebraic step, or an inductive step that doesn't follow).
+
+Reading the handwriting carefully:
+- Handwritten math is messy. Read each line charitably and in the context of the problem and the surrounding lines.
+- Watch for easily-confused characters: 7 vs 1, t vs +, x vs \u00d7, 5 vs S, 0 vs O, 2 vs z, n vs h. Use the surrounding context to disambiguate.
+
+When to mark a step INCORRECT (be conservative \u2014 only flag genuine mistakes):
+- Mark incorrect ONLY when there is a clear, unambiguous mathematical error (wrong arithmetic, invalid algebra, sign error, a claim that is false, or a step that does not follow).
+- BEFORE flagging arithmetic, recompute it yourself from the problem and the preceding line. Only mark the line incorrect if your own recomputation disagrees with what is written. Do not flag a line merely because it skips the intermediate working.
+- Rearranging an equation is valid and extremely common: terms moved across the equals sign change sign, and like terms are then combined. For example, from "16 - 2t = 5t + 9" the line "16 - 9 = 5t + 2t" is CORRECT, and so is the resulting "7 = 7t". Verify such a rearrangement by substituting back, not by expecting a particular order of operations.
+- Do NOT mark incorrect for: scaffolding/prose lines, skipped steps, starting midway, unconventional but valid approaches, or messy-but-plausible handwriting.
+- If you are unsure whether a line is wrong or just hard to read, give the student the benefit of the doubt and mark it CORRECT.
+- Never refuse to evaluate later lines because an earlier line looked odd \u2014 assess every line on its own merits within the overall argument.
+
+Completion:
+- For equation solving: a correct line that isolates the unknown (e.g. "x = 3") is the final answer.
+- For a proof: completion is reaching a valid conclusion (e.g. finishing the inductive step and concluding the statement holds for all n).
+- When the work is complete and correct, set the top-level "isCorrect" to true, set "percentage" to 100, and mark that concluding step isCorrect = true.
+
+Guidance for percentage (applies to both solving and proofs):
+- 0   = nothing meaningful written yet
+- 25  = a correct start is on the page (e.g. base case checked, or first useful step)
+- 50  = solidly underway (e.g. inductive hypothesis stated, or halfway through the working)
+- 75  = nearly there (e.g. most of the inductive step done, or close to the answer)
+- 100 = a complete, correct solution / proof
+
+Even if the handwriting is messy or partial, ALWAYS produce your best guess. Never refuse.`;
+
+export const recognizeMath = action({
+  args: {
+    imageBase64: v.string(),
+    problem: v.optional(v.string()),
+  },
+  handler: async (ctx, { imageBase64, problem }): Promise<RecognizeResult> => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) return RECOGNIZE_FALLBACK;
+
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      console.warn("[recognizeMath] GROQ_API_KEY is not configured");
+      return RECOGNIZE_FALLBACK;
+    }
+
+    // Request shape is unchanged from the web route: same OpenAI-compatible
+    // multimodal message, same JSON mode, same low temperature for mark
+    // stability. Only the model id differs.
+    const buildBody = (model: string) =>
+      JSON.stringify({
+        model,
+        temperature: 0.2,
+        // Raised from the web route's 1024. Qwen is a reasoning model, and a
+        // truncated response fails JSON parsing and silently degrades to the
+        // fallback — which reads as "no marks" rather than as an error.
+        max_tokens: 2048,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `${RECOGNIZE_SYSTEM_PROMPT}\n\nProblem context: ${
+                  problem || "(unknown \u2014 infer from the image)"
+                }`,
+              },
+              {
+                type: "image_url",
+                image_url: { url: `data:image/png;base64,${imageBase64}` },
+              },
+            ],
+          },
+        ],
+      });
+
+    const call = (model: string) =>
+      fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: buildBody(model),
+      });
+
+    try {
+      let response = await call(GROQ_VISION_MODEL);
+
+      // One retry on a different model rather than a backoff loop: this runs
+      // per stroke, so a slow retry is worse than a missing mark.
+      if (!response.ok && RETRYABLE_STATUS.has(response.status)) {
+        console.warn(
+          `[recognizeMath] ${GROQ_VISION_MODEL} returned ${response.status}; trying ${GROQ_VISION_FALLBACK_MODEL}`
+        );
+        response = await call(GROQ_VISION_FALLBACK_MODEL);
+      }
+
+      if (!response.ok) {
+        const text = await response.text();
+        console.error(
+          `[recognizeMath] groq ${response.status}: ${text.slice(0, 400)}`
+        );
+
+        // Surface backoff to the client so it stops hammering. Groq puts the
+        // wait in a header on some responses and in the body on others
+        // ("try again in 12.5s"), so both are checked, as in the web route.
+        if (RETRYABLE_STATUS.has(response.status)) {
+          const headerRetry = response.headers.get("retry-after");
+          const bodyMatch = text.match(/try again in ([\d.]+)s/i);
+          const retryAfterSeconds = headerRetry
+            ? Math.max(1, Math.ceil(Number(headerRetry)))
+            : bodyMatch
+              ? Math.max(1, Math.ceil(parseFloat(bodyMatch[1])))
+              : 30;
+          return {
+            ...RECOGNIZE_FALLBACK,
+            rateLimited: true,
+            retryAfterSeconds,
+          };
+        }
+
+        return RECOGNIZE_FALLBACK;
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+
+      const text = data.choices?.[0]?.message?.content;
+      if (!text) return RECOGNIZE_FALLBACK;
+
+      const parsed = parseJsonFromText(text) as Record<string, unknown>;
+      const percentage = Number(parsed.percentage);
+
+      return {
+        latex: typeof parsed.latex === "string" ? parsed.latex : "",
+        isCorrect:
+          typeof parsed.isCorrect === "boolean" ? parsed.isCorrect : true,
+        percentage: Number.isFinite(percentage)
+          ? Math.max(0, Math.min(100, percentage))
+          : 0,
+        feedback: typeof parsed.feedback === "string" ? parsed.feedback : "",
+        steps: normaliseSteps(parsed.steps),
+      };
+    } catch (error) {
+      console.error("[recognizeMath] unhandled", error);
+      return RECOGNIZE_FALLBACK;
+    }
+  },
+});
+
 /*
  * ---------------------------------------------------------------------------
- * TODO (marking pipeline): recognizeMath + markWorking
+ * TODO (still to port): markWorking — the deliberate "Submit working" pass
  * ---------------------------------------------------------------------------
- * These two are not ported yet, and the model choice is now an open decision
- * rather than a straight copy.
+ * Separate from live marking: the student explicitly submits, and the model does
+ * a slower, more careful full-page pass at lower temperature.
  *
- * The web app used Llama 4 Scout on Groq for both, deliberately: `recognize-math`
- * fires after every stroke, so Groq's latency mattered more than peak accuracy.
- * That reasoning does not survive the model landscape changing:
- *
- *   - `openai/gpt-oss-120b` cannot be used here. It is text only, and both of
- *     these routes send a PNG of the canvas.
- *   - Groq's vision options have thinned considerably.
- *
- * Realistic options, in rough order of preference:
- *
- *   1. Gemini Flash-Lite for `recognize-math` and Gemini 3.8 Flash for
- *      `mark-working`. Keeps the fast/deliberate split that made the web
- *      pipeline work, at the cost of moving off Groq and losing some latency.
- *   2. Gemini 3.8 Flash for both. Simplest, but the per-stroke path becomes
- *      slower and more expensive; the existing 2s debounce, 5s minimum interval
- *      and single-in-flight guard become load-bearing rather than protective.
- *   3. Whatever vision model Groq currently offers, if latency turns out to
- *      dominate accuracy in practice on phone-sized finger handwriting.
- *
- * Worth deciding only after measuring how legible fingertip handwriting actually
- * is through `lib/capture-canvas.ts` — if accuracy is the binding constraint,
- * option 1 or 2 wins regardless of latency.
+ * Two things to sort out when porting it:
+ *   - Model: Gemini 3.8 Flash is the better choice here, since this pass is
+ *     deliberate rather than per-stroke and accuracy beats latency.
+ *   - The web version showed each error's explanation in a hover tooltip, which
+ *     has no touch equivalent. Tap-to-reveal on the mark, rendered in the native
+ *     overlay rather than in Skia (which cannot draw text without font setup).
  */

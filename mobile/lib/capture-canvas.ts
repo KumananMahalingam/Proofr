@@ -31,8 +31,10 @@ export interface CaptureOptions {
   images?: ReadonlyMap<string, SkImage>;
   /** Canvas units of whitespace around `bounds`. Web default was 60. */
   padding?: number;
-  /** Cap on the longest output side, to keep the upload bounded. */
+  /** Target for the longest output side. Bounds the upload. */
   maxDim?: number;
+  /** Ceiling on upscaling of small drawings. */
+  maxUpscale?: number;
   /** Pass `[LayerType.Path]` to send the model only the student's ink. */
   onlyTypes?: readonly LayerType[];
 }
@@ -54,7 +56,8 @@ export function captureLayers({
   layers,
   images,
   padding = 60,
-  maxDim = 1600,
+  maxDim = 2000,
+  maxUpscale = 3,
   onlyTypes,
 }: CaptureOptions): CaptureResult | null {
   const viewBox: CanvasBounds = {
@@ -64,7 +67,21 @@ export function captureLayers({
     height: Math.max(1, Math.ceil(bounds.height + padding * 2)),
   };
 
-  const scale = Math.min(1, maxDim / Math.max(viewBox.width, viewBox.height));
+  /**
+   * Scale to fill `maxDim`, upscaling when the drawing is small.
+   *
+   * The web version was `Math.min(1, maxDim / longest)` — downscale only — which
+   * made sense on a desktop canvas where a page of working was already ~1000px.
+   * On a phone the captured region is often much smaller in canvas units, and
+   * capping at 1x handed the model a small, thin-inked image. That is a large part
+   * of why recognition struggles here compared with the web app.
+   *
+   * Upscaling is capped: past a point it just costs upload size and encode time
+   * without adding any real detail.
+   */
+  const longest = Math.max(viewBox.width, viewBox.height);
+  const scale = Math.min(maxUpscale, maxDim / longest);
+
   const outW = Math.max(1, Math.round(viewBox.width * scale));
   const outH = Math.max(1, Math.round(viewBox.height * scale));
 

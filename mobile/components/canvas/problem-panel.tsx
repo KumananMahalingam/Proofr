@@ -37,12 +37,19 @@ interface ProblemPanelProps {
   onClose: () => void;
   /** Storage id of the selected image layer, or null if none is selected. */
   activeStorageId: string | null;
+  /**
+   * Reports the extracted problem so the marking pipeline can use it as context.
+   * The web app re-extracted it separately inside `HandwritingOverlay`; sharing
+   * it here avoids a second OCR call per problem.
+   */
+  onProblemExtracted?: (text: string) => void;
 }
 
 export const ProblemPanel = ({
   visible,
   onClose,
   activeStorageId,
+  onProblemExtracted,
 }: ProblemPanelProps) => {
   const insets = useSafeAreaInsets();
 
@@ -76,7 +83,9 @@ export const ProblemPanel = ({
       const extracted = await extractMath({
         storageId: activeStorageId as Id<"_storage">,
       });
+      const problemText = extracted.text || extracted.latex;
       setLatex(extracted.latex || extracted.text);
+      if (problemText) onProblemExtracted?.(problemText);
 
       const result = await analyseProblem({
         latex: extracted.latex,

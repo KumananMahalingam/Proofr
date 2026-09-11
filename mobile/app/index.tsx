@@ -16,17 +16,20 @@
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { useAuth, useOrganizationList, useUser } from "@clerk/clerk-expo";
 import { useMutation, useQuery } from "convex/react";
 import { Link, useRouter } from "expo-router";
 
 import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 
 export default function HomeScreen() {
   const { orgId, signOut } = useAuth();
@@ -75,7 +78,25 @@ const BoardList = ({
   const router = useRouter();
   const boards = useQuery(api.boards.get, { orgId });
   const createBoard = useMutation(api.board.create);
+  const removeBoard = useMutation(api.board.remove);
   const [creating, setCreating] = useState(false);
+
+  // Deleting a board is irreversible and takes all its canvas contents with it,
+  // so it is behind a confirmation rather than a single tap.
+  const confirmDelete = (boardId: Id<"boards">, title: string) => {
+    Alert.alert(
+      "Delete board?",
+      `"${title}" and everything on it will be permanently deleted.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => void removeBoard({ id: boardId }),
+        },
+      ]
+    );
+  };
 
   const onCreate = async () => {
     setCreating(true);
@@ -115,12 +136,26 @@ const BoardList = ({
             </Text>
           }
           renderItem={({ item }) => (
-            <Link href={`/board/${item._id}`} asChild>
-              <Pressable style={styles.row}>
-                <Text style={styles.rowTitle}>{item.title}</Text>
-                <Text style={styles.rowMeta}>{item.authorName}</Text>
+            <View style={styles.row}>
+              <Link href={`/board/${item._id}`} asChild>
+                <Pressable style={styles.rowMain}>
+                  <Text style={styles.rowTitle}>{item.title}</Text>
+                  <Text style={styles.rowMeta}>{item.authorName}</Text>
+                </Pressable>
+              </Link>
+
+              <Pressable
+                onPress={() => confirmDelete(item._id, item.title)}
+                hitSlop={8}
+                style={styles.rowDelete}
+              >
+                <MaterialCommunityIcons
+                  name="trash-can-outline"
+                  size={20}
+                  color="#f87171"
+                />
               </Pressable>
-            </Link>
+            </View>
           )}
         />
       )}
@@ -156,12 +191,15 @@ const styles = StyleSheet.create({
   loader: { marginTop: 24 },
   list: { paddingTop: 20, gap: 10 },
   row: {
+    flexDirection: "row",
+    alignItems: "center",
     backgroundColor: "rgba(255,255,255,0.05)",
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.1)",
     borderRadius: 12,
-    padding: 16,
   },
+  rowMain: { flex: 1, padding: 16 },
+  rowDelete: { paddingHorizontal: 16, paddingVertical: 18 },
   rowTitle: { color: "#fff", fontWeight: "600", fontSize: 16 },
   rowMeta: { color: "rgba(255,255,255,0.4)", fontSize: 12, marginTop: 2 },
 });

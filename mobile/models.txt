@@ -1,0 +1,16 @@
+﻿[
+  "allam-2-7b (ctx 4096)",
+  "canopylabs/orpheus-arabic-saudi (ctx 4000)",
+  "canopylabs/orpheus-v1-english (ctx 4000)",
+  "groq/compound (ctx 131072)",
+  "groq/compound-mini (ctx 131072)",
+  "meta-llama/llama-prompt-guard-2-22m (ctx 512)",
+  "meta-llama/llama-prompt-guard-2-86m (ctx 512)",
+  "openai/gpt-oss-120b (ctx 131072)",
+  "openai/gpt-oss-20b (ctx 131072)",
+  "openai/gpt-oss-safeguard-20b (ctx 131072)",
+  "qwen/qwen3.6-27b (ctx 131072)",
+  "qwen/qwen3.8-27b (ctx 131042)",
+  "whisper-large-v3 (ctx 448)",
+  "whisper-large-v3-turbo (ctx 448)"
+]

@@ -255,3 +255,120 @@ export function boundsOf(
   if (!Number.isFinite(minX)) return null;
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
+
+/**
+ * Vertical centre and right edge of each handwritten line, derived from stroke
+ * geometry. Direct port of `getPathLineAnchors` from the web `canvas.tsx`.
+ *
+ * This is the fix the web app's README describes as the hardest problem in the
+ * project, and it ports across untouched because it never depended on the
+ * renderer — only on bounding boxes already in storage.
+ *
+ * The split of responsibility is the whole point:
+ *   - the MODEL decides judgement and order (which lines exist, top to bottom,
+ *     and whether each is right)
+ *   - the CLIENT decides position, by clustering strokes into lines
+ *
+ * Vision models read content well and estimate coordinates badly, so trusting
+ * their (x, y) made marks drift between lines. Model verdicts are mapped onto
+ * these anchors by index instead.
+ */
+export type StrokeLineAnchor = { y: number; rightX: number };
+
+/**
+ * Horizontal gap between a line's rightmost ink and its mark, as a fraction of
+ * the detected line height. The web app used a flat 20 canvas units, which is
+ * invisible next to letters several hundred units tall.
+ */
+const LINE_RIGHT_EDGE_RATIO = 0.35;
+
+/**
+ * How far apart two strokes' vertical centres can be and still count as the same
+ * line, as a fraction of the detected line height.
+ */
+const LINE_GROUP_RATIO = 0.7;
+
+/** Floor for tiny drawings, so the threshold never collapses to nothing. */
+const MIN_LINE_THRESHOLD = 16;
+
+export function getPathLineAnchors(
+  layerIds: readonly string[],
+  layers: LayerLookup
+): StrokeLineAnchor[] {
+  const strokes: Array<{ midY: number; rightX: number; height: number }> = [];
+
+  for (const id of layerIds) {
+    const layer = getLayer(layers, id);
+    if (!layer || layer.type !== LayerType.Path) continue;
+
+    strokes.push({
+      midY: layer.y + layer.height / 2,
+      rightX: layer.x + layer.width,
+      height: layer.height,
+    });
+  }
+
+  if (strokes.length === 0) return [];
+
+  /**
+   * Derive the clustering threshold from the ink itself rather than hardcoding it.
+   *
+   * This is the fix for marks landing mid-line on mobile. The web app's flat
+   * 50-unit threshold assumed desktop-sized handwriting; a finger on a zoomed-out
+   * phone canvas produces letters many times larger, so strokes on the same line
+   * differ in vertical centre by far more than 50 units. Every stroke then became
+   * its own "line", and the model's ordered verdicts mapped onto individual
+   * strokes instead of lines.
+   *
+   * The 75th percentile of stroke heights approximates the height of a tall
+   * letter, which is a good proxy for line height — the median would be dragged
+   * down by dots, minus signs, and equals bars.
+   */
+  const sortedHeights = strokes.map((s) => s.height).sort((a, b) => a - b);
+  const p75 =
+    sortedHeights[Math.min(sortedHeights.length - 1, Math.floor(sortedHeights.length * 0.75))] ?? 0;
+
+  const lineHeight = Math.max(MIN_LINE_THRESHOLD, p75);
+  const threshold = Math.max(MIN_LINE_THRESHOLD, lineHeight * LINE_GROUP_RATIO);
+  const rightOffset = lineHeight * LINE_RIGHT_EDGE_RATIO;
+
+  strokes.sort((a, b) => a.midY - b.midY);
+
+  type Group = { sumMidY: number; count: number; maxRightX: number };
+  const groups: Group[] = [];
+
+  for (const stroke of strokes) {
+    let selected: Group | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+
+    for (const group of groups) {
+      const groupMidY = group.sumMidY / group.count;
+      const distance = Math.abs(stroke.midY - groupMidY);
+      if (distance <= threshold && distance < bestDistance) {
+        selected = group;
+        bestDistance = distance;
+      }
+    }
+
+    if (!selected) {
+      groups.push({
+        sumMidY: stroke.midY,
+        count: 1,
+        maxRightX: stroke.rightX,
+      });
+    } else {
+      selected.sumMidY += stroke.midY;
+      selected.count += 1;
+      if (stroke.rightX > selected.maxRightX) {
+        selected.maxRightX = stroke.rightX;
+      }
+    }
+  }
+
+  return groups
+    .map((group) => ({
+      y: group.sumMidY / group.count,
+      rightX: group.maxRightX + rightOffset,
+    }))
+    .sort((a, b) => a.y - b.y);
+}

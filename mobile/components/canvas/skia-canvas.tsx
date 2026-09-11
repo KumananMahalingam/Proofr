@@ -29,7 +29,7 @@
  * selection, and step/marking overlays. Those belong in the native overlay
  * layer alongside note text.
  */
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import {
   Canvas,
@@ -88,8 +88,13 @@ import {
 } from "@/lib/skia-draw";
 import type { CameraController } from "@/hooks/use-camera";
 import { useLayerImages } from "@/hooks/use-layer-images";
+import {
+  useHandwritingRecognition,
+  type VerificationState,
+} from "@/hooks/use-handwriting-recognition";
 import { GridBackground } from "./grid-background";
 import { NoteOverlay } from "./note-overlay";
+import { StepMarkers } from "./step-markers";
 
 const MAX_LAYERS = 10_000;
 const ERASER_RADIUS = 14;
@@ -107,10 +112,10 @@ interface SkiaCanvasProps {
    * canvas does not create its own camera.
    */
   camera: CameraController;
-  /** Bumped when a stroke is committed, to drive the recognition pipeline. */
-  onStrokeEnd?: () => void;
-  /** Called when erasing invalidates existing marks. */
-  onMarksInvalidated?: () => void;
+  /** Extracted problem text, passed to the model as context for marking. */
+  problemText?: string;
+  /** Reports marking progress up so the board screen can render the bar. */
+  onVerificationChange?: (state: VerificationState) => void;
 }
 
 export const SkiaCanvas = ({
@@ -118,8 +123,8 @@ export const SkiaCanvas = ({
   setCanvasState,
   lastUsedColor,
   camera,
-  onStrokeEnd,
-  onMarksInvalidated,
+  problemText,
+  onVerificationChange,
 }: SkiaCanvasProps) => {
   const canvasRef = useCanvasRef();
 
@@ -151,6 +156,26 @@ export const SkiaCanvas = ({
 
   const images = useLayerImages(layerIds ?? [], layers);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+
+  /**
+   * Incremented once per committed stroke, and after erasing. This is the single
+   * trigger for the whole marking pipeline — the mobile equivalent of the web
+   * app's `strokeEndTick`.
+   */
+  const [strokeTick, setStrokeTick] = useState(0);
+
+  const { state: verification, markers, clearMarks } =
+    useHandwritingRecognition({
+      strokeTick,
+      layerIds: layerIds ?? [],
+      layers,
+      images,
+      problemText,
+    });
+
+  useEffect(() => {
+    onVerificationChange?.(verification);
+  }, [verification, onVerificationChange]);
 
   // --- live stroke (UI thread) -------------------------------------------
 
@@ -316,16 +341,22 @@ export const SkiaCanvas = ({
         return;
       }
       insertPath(points);
-      onStrokeEnd?.();
+      setStrokeTick((tick) => tick + 1);
     },
-    [history, insertPath, onStrokeEnd, updateMyPresence]
+    [history, insertPath, updateMyPresence]
   );
 
   const onErase = useCallback(
     (point: Point) => {
-      if (eraseAtPoint(point)) onMarksInvalidated?.();
+      if (!eraseAtPoint(point)) return;
+
+      // Erasing moves the geometry the marks were placed against, so existing
+      // ticks are stale immediately. Clear them, then re-run recognition on
+      // what's left — same behaviour as the web eraser.
+      clearMarks();
+      setStrokeTick((tick) => tick + 1);
     },
-    [eraseAtPoint, onMarksInvalidated]
+    [clearMarks, eraseAtPoint]
   );
 
   const onTap = useCallback(
@@ -356,12 +387,21 @@ export const SkiaCanvas = ({
   const eraserCursor = useSharedValue<Point | null>(null);
   const lastTranslate = useSharedValue<Point>({ x: 0, y: 0 });
 
+  // Drawing tools need to react the instant a finger lands, so a single dot
+  // registers as a stroke. Everything else must NOT, because `Gesture.Race`
+  // awards the gesture to whichever activates first: with `minDistance(0)` the
+  // pan always beat the tap, so tap-to-select never fired and nothing could be
+  // selected — which is why images and shapes could not be deleted.
+  const drawingMode =
+    canvasState.mode === CanvasMode.Pencil ||
+    canvasState.mode === CanvasMode.Eraser;
+
   const toolPan = Gesture.Pan()
     // One finger only. Two fingers is always pan/zoom, which is what makes the
     // "draw vs. navigate" distinction unambiguous on a touchscreen — the web
     // app had to disambiguate this by hand with capture-phase pointer listeners.
     .maxPointers(1)
-    .minDistance(0)
+    .minDistance(drawingMode ? 0 : 8)
     .onStart((e) => {
       "worklet";
       const point = toCanvas(e.x, e.y);
@@ -531,6 +571,7 @@ export const SkiaCanvas = ({
             />
             <Picture picture={committedPicture} />
             <Path path={draftPath} paint={draftPaint} />
+            <StepMarkers markers={markers} />
             {otherDraftPaths.map((draft) => (
               <Path
                 key={draft.key}
