@@ -29,7 +29,7 @@
  * selection, and step/marking overlays. Those belong in the native overlay
  * layer alongside note text.
  */
-import React, { useCallback, useMemo, useRef, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import {
   Canvas,
@@ -43,6 +43,7 @@ import {
   StrokeJoin,
   createPicture,
   useCanvasRef,
+  type SkPath,
 } from "@shopify/react-native-skia";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
@@ -85,8 +86,9 @@ import {
   buildPreviewPath,
   drawLayers,
 } from "@/lib/skia-draw";
-import { useCamera } from "@/hooks/use-camera";
+import type { CameraController } from "@/hooks/use-camera";
 import { useLayerImages } from "@/hooks/use-layer-images";
+import { GridBackground } from "./grid-background";
 import { NoteOverlay } from "./note-overlay";
 
 const MAX_LAYERS = 10_000;
@@ -100,6 +102,11 @@ interface SkiaCanvasProps {
   canvasState: CanvasState;
   setCanvasState: (state: CanvasState) => void;
   lastUsedColor: Color;
+  /**
+   * Owned by the board screen so the header's zoom controls can drive it. The
+   * canvas does not create its own camera.
+   */
+  camera: CameraController;
   /** Bumped when a stroke is committed, to drive the recognition pipeline. */
   onStrokeEnd?: () => void;
   /** Called when erasing invalidates existing marks. */
@@ -110,11 +117,31 @@ export const SkiaCanvas = ({
   canvasState,
   setCanvasState,
   lastUsedColor,
+  camera,
   onStrokeEnd,
   onMarksInvalidated,
 }: SkiaCanvasProps) => {
   const canvasRef = useCanvasRef();
-  const camera = useCamera();
+
+  // Destructured up front, and it must stay that way.
+  //
+  // Reanimated serialises everything a worklet closes over. `useCamera()`
+  // returns an object that also holds GestureType instances (pinch/pan), and
+  // those cannot be copied to the UI thread. Writing `camera.toCanvas(...)`
+  // inside a gesture callback captures the whole `camera` object and fails at
+  // runtime with:
+  //
+  //   [Worklets] Cannot copy value of type `PinchGesture`
+  //
+  // Referencing the extracted `toCanvas` instead captures only that function,
+  // which closes over shared values and serialises fine.
+  const {
+    transform: cameraTransform,
+    overlayStyle: cameraOverlayStyle,
+    pinch: cameraPinch,
+    pan: cameraPan,
+    toCanvas,
+  } = camera;
   const history = useHistory();
   const updateMyPresence = useUpdateMyPresence();
 
@@ -131,13 +158,19 @@ export const SkiaCanvas = ({
   const draftPath = useDerivedValue(() => buildPreviewPath(draftPoints.value));
   const draftColor = useMemo(() => colorToCss(lastUsedColor), [lastUsedColor]);
 
-  const lastPresenceAtRef = useRef(0);
+  /**
+   * Throttle timestamp for presence broadcasts.
+   *
+   * A shared value, not a ref, and deliberately so. The gesture worklet closes
+   * over `broadcastDraft`, and Reanimated serialises that closure — a ref caught
+   * in it triggers "[Worklets] Tried to modify key `current` of an object which
+   * has been already passed to a worklet" the moment JS mutates it. Keeping the
+   * throttle on the UI thread also avoids scheduling JS work just to discard it.
+   */
+  const lastPresenceAt = useSharedValue(0);
 
   const broadcastDraft = useCallback(
     (points: StrokePoint[]) => {
-      const now = Date.now();
-      if (now - lastPresenceAtRef.current < PRESENCE_INTERVAL_MS) return;
-      lastPresenceAtRef.current = now;
       updateMyPresence({ pencilDraft: points, penColor: lastUsedColor });
     },
     [lastUsedColor, updateMyPresence]
@@ -331,7 +364,7 @@ export const SkiaCanvas = ({
     .minDistance(0)
     .onStart((e) => {
       "worklet";
-      const point = camera.toCanvas(e.x, e.y);
+      const point = toCanvas(e.x, e.y);
 
       if (canvasState.mode === CanvasMode.Pencil) {
         draftPoints.value = [[point.x, point.y]];
@@ -349,11 +382,17 @@ export const SkiaCanvas = ({
     })
     .onUpdate((e) => {
       "worklet";
-      const point = camera.toCanvas(e.x, e.y);
+      const point = toCanvas(e.x, e.y);
 
       if (canvasState.mode === CanvasMode.Pencil) {
         draftPoints.value = [...draftPoints.value, [point.x, point.y]];
-        scheduleOnRN(broadcastDraft, draftPoints.value);
+
+        // ~20Hz. Enough for smooth remote ink without saturating the socket.
+        const now = Date.now();
+        if (now - lastPresenceAt.value >= PRESENCE_INTERVAL_MS) {
+          lastPresenceAt.value = now;
+          scheduleOnRN(broadcastDraft, draftPoints.value);
+        }
         return;
       }
 
@@ -391,14 +430,14 @@ export const SkiaCanvas = ({
     ) {
       return;
     }
-    scheduleOnRN(onTap, camera.toCanvas(e.x, e.y));
+    scheduleOnRN(onTap, toCanvas(e.x, e.y));
   });
 
   // Pinch runs alongside the tool gesture so a two-finger zoom can interrupt a
   // one-finger drag without the tool gesture having to know about it.
   const gesture = Gesture.Simultaneous(
     Gesture.Race(tap, toolPan),
-    Gesture.Simultaneous(camera.pinch, camera.pan)
+    Gesture.Simultaneous(cameraPinch, cameraPan)
   );
 
   // --- rendering ----------------------------------------------------------
@@ -440,14 +479,69 @@ export const SkiaCanvas = ({
   const eraserCx = useDerivedValue(() => eraserRing.value?.x ?? -9999);
   const eraserCy = useDerivedValue(() => eraserRing.value?.y ?? -9999);
 
+  /**
+   * Other users' in-progress strokes, from presence.
+   *
+   * This has to be read here, in the component that *renders* `<Canvas>`, not in
+   * a child inside it. react-native-skia draws its subtree with its own React
+   * reconciler, so React context does not cross the `<Canvas>` boundary — any
+   * Liveblocks hook called inside it fails with "RoomProvider is missing from
+   * the React tree". Geometry is therefore built out here and handed in as plain
+   * data.
+   */
+  const othersDrafts = useOthersMapped((other) => ({
+    pencilDraft: other.presence.pencilDraft,
+    penColor: other.presence.penColor,
+  }));
+
+  const otherDraftPaths = useMemo(() => {
+    const result: Array<{ key: number; path: SkPath; color: string }> = [];
+
+    for (const [connectionId, other] of othersDrafts) {
+      const draft = other.pencilDraft;
+      if (!draft || draft.length < 2) continue;
+
+      const path = Skia.Path.Make();
+      path.moveTo(draft[0][0], draft[0][1]);
+      for (let i = 1; i < draft.length; i++) {
+        const [cx, cy] = draft[i - 1];
+        const [nx, ny] = draft[i];
+        path.quadTo(cx, cy, (cx + nx) / 2, (cy + ny) / 2);
+      }
+
+      result.push({
+        key: connectionId,
+        path,
+        color: other.penColor ? colorToCss(other.penColor) : "#000000",
+      });
+    }
+
+    return result;
+  }, [othersDrafts]);
+
   return (
     <GestureDetector gesture={gesture}>
       <View style={styles.root}>
         <Canvas ref={canvasRef} style={styles.canvas}>
-          <Group transform={camera.transform}>
+          <Group transform={cameraTransform}>
+            <GridBackground
+              cameraX={camera.x}
+              cameraY={camera.y}
+              zoom={camera.zoom}
+            />
             <Picture picture={committedPicture} />
             <Path path={draftPath} paint={draftPaint} />
-            <OtherDrafts />
+            {otherDraftPaths.map((draft) => (
+              <Path
+                key={draft.key}
+                path={draft.path}
+                style="stroke"
+                strokeWidth={PREVIEW_STROKE_WIDTH}
+                strokeCap="round"
+                strokeJoin="round"
+                color={draft.color}
+              />
+            ))}
             {canvasState.mode === CanvasMode.Eraser && (
               <Circle
                 cx={eraserCx}
@@ -467,7 +561,7 @@ export const SkiaCanvas = ({
         */}
         <Animated.View
           pointerEvents="box-none"
-          style={[styles.overlay, camera.overlayStyle]}
+          style={[styles.overlay, cameraOverlayStyle]}
         >
           <NoteOverlay
             layerIds={layerIds ?? []}
@@ -478,47 +572,6 @@ export const SkiaCanvas = ({
         </Animated.View>
       </View>
     </GestureDetector>
-  );
-};
-
-/**
- * Other users' in-progress strokes, from presence.
- *
- * Kept in its own component so remote ink updates don't re-render the whole
- * canvas or invalidate the committed picture.
- */
-const OtherDrafts = () => {
-  const others = useOthersMapped((other) => ({
-    pencilDraft: other.presence.pencilDraft,
-    penColor: other.presence.penColor,
-  }));
-
-  return (
-    <>
-      {others.map(([connectionId, other]) => {
-        if (!other.pencilDraft || other.pencilDraft.length < 2) return null;
-
-        const path = Skia.Path.Make();
-        path.moveTo(other.pencilDraft[0][0], other.pencilDraft[0][1]);
-        for (let i = 1; i < other.pencilDraft.length; i++) {
-          const [cx, cy] = other.pencilDraft[i - 1];
-          const [nx, ny] = other.pencilDraft[i];
-          path.quadTo(cx, cy, (cx + nx) / 2, (cy + ny) / 2);
-        }
-
-        return (
-          <Path
-            key={connectionId}
-            path={path}
-            style="stroke"
-            strokeWidth={PREVIEW_STROKE_WIDTH}
-            strokeCap="round"
-            strokeJoin="round"
-            color={other.penColor ? colorToCss(other.penColor) : "#000000"}
-          />
-        );
-      })}
-    </>
   );
 };
 

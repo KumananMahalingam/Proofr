@@ -19,6 +19,7 @@ import {
   AuthLoading,
   Authenticated,
   ConvexReactClient,
+  Unauthenticated,
   useConvex,
 } from "convex/react";
 import { LiveList, LiveMap, type LiveObject } from "@liveblocks/client";
@@ -30,6 +31,7 @@ import {
 
 import { api } from "@/convex/_generated/api";
 import type { Layer } from "@/types/canvas";
+import { AuthScreen } from "@/components/auth-screen";
 
 const convex = new ConvexReactClient(process.env.EXPO_PUBLIC_CONVEX_URL!, {
   // React Native has no window to listen to; without this the client keeps a
@@ -68,6 +70,15 @@ export const AppProviders = ({ children }: { children: ReactNode }) => {
         <Authenticated>
           <LiveblocksAuthProvider>{children}</LiveblocksAuthProvider>
         </Authenticated>
+        {/*
+          Without this branch an unsigned launch renders nothing at all. The web
+          app never needed it because `middleware.ts` redirected to Clerk's
+          hosted pages before any React ran; there is no middleware on a device,
+          so the unauthenticated state has to be handled in the tree.
+        */}
+        <Unauthenticated>
+          <AuthScreen />
+        </Unauthenticated>
         <AuthLoading>
           <Loading />
         </AuthLoading>

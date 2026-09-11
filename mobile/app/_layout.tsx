@@ -1,3 +1,8 @@
+// Must be first: shims atob/btoa and window event methods before Liveblocks or
+// Clerk are evaluated. See polyfills.ts — Liveblocks throws at import time
+// without it.
+import "@/polyfills";
+
 import { useFonts } from "expo-font";
 import { Kalam_400Regular } from "@expo-google-fonts/kalam";
 import { Stack } from "expo-router";

@@ -15,6 +15,7 @@
 import { useCallback } from "react";
 import { useWindowDimensions } from "react-native";
 import * as ImagePicker from "expo-image-picker";
+import { File, UploadType } from "expo-file-system";
 import { useConvex, useMutation as useConvexMutation } from "convex/react";
 import { LiveObject } from "@liveblocks/client";
 import { nanoid } from "nanoid/non-secure";
@@ -76,15 +77,31 @@ export function useInsertImage(
       const asset = result.assets[0];
 
       // Upload straight to Convex storage.
+      //
+      // Deliberately NOT `fetch(uploadUrl, { body: await (await
+      // fetch(asset.uri)).blob() })`. Reading a `file://` URI through fetch and
+      // Blob is unreliable in React Native — it round-trips the whole image
+      // through the native blob store via base64 (RN even warns about it) and
+      // fails outright here. `createUploadTask` streams the file natively.
       const uploadUrl = await generateUploadUrl();
-      const response = await fetch(uploadUrl, {
-        method: "POST",
+
+      const file = new File(asset.uri);
+      const task = file.createUploadTask(uploadUrl, {
+        httpMethod: "POST",
+        uploadType: UploadType.BINARY_CONTENT,
         headers: { "Content-Type": asset.mimeType ?? "image/jpeg" },
-        body: await (await fetch(asset.uri)).blob(),
       });
 
-      if (!response.ok) throw new Error("Upload failed");
-      const { storageId } = (await response.json()) as { storageId: string };
+      const uploadResult = await task.uploadAsync();
+      if (uploadResult.status < 200 || uploadResult.status >= 300) {
+        throw new Error(
+          `Upload failed (${uploadResult.status}): ${uploadResult.body}`
+        );
+      }
+
+      const { storageId } = JSON.parse(uploadResult.body) as {
+        storageId: string;
+      };
 
       // Resolve the shared URL before inserting. `asset.uri` is a local
       // `file://` path that only exists on this device, so storing it would

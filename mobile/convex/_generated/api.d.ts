@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as ai from "../ai.js";
 import type * as board from "../board.js";
 import type * as boards from "../boards.js";
 import type * as images from "../images.js";
@@ -20,6 +21,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  ai: typeof ai;
   board: typeof board;
   boards: typeof boards;
   images: typeof images;

@@ -114,6 +114,51 @@ export function useCamera() {
     zoom: zoom.value,
   });
 
+  /**
+   * Zoom by a factor about a screen point. Called from the JS thread by the
+   * on-screen zoom controls — writing shared values from JS is allowed, and the
+   * Skia group picks the change up on the next frame without a React re-render.
+   *
+   * Same anchoring maths as the pinch gesture and as the web `zoomCameraAt`.
+   */
+  const zoomBy = (factor: number, screenX: number, screenY: number) => {
+    const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom.value * factor));
+    const ratio = next / zoom.value;
+    zoom.value = next;
+    x.value = screenX - (screenX - x.value) * ratio;
+    y.value = screenY - (screenY - y.value) * ratio;
+  };
+
+  const reset = () => {
+    x.value = 0;
+    y.value = 0;
+    zoom.value = 1;
+  };
+
+  /** Centre the given canvas-space rect in a viewport of the given size. */
+  const fitTo = (
+    bounds: { x: number; y: number; width: number; height: number },
+    viewport: { width: number; height: number },
+    padding = 48
+  ) => {
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+
+    const scale = Math.max(
+      MIN_ZOOM,
+      Math.min(
+        MAX_ZOOM,
+        Math.min(
+          (viewport.width - padding * 2) / bounds.width,
+          (viewport.height - padding * 2) / bounds.height
+        )
+      )
+    );
+
+    zoom.value = scale;
+    x.value = viewport.width / 2 - (bounds.x + bounds.width / 2) * scale;
+    y.value = viewport.height / 2 - (bounds.y + bounds.height / 2) * scale;
+  };
+
   return {
     x,
     y,
@@ -124,5 +169,8 @@ export function useCamera() {
     pan,
     toCanvas,
     snapshot,
+    zoomBy,
+    reset,
+    fitTo,
   };
 }
