@@ -137,20 +137,43 @@ export function drawLayers(
         break;
       }
 
-      case LayerType.Note:
+      case LayerType.Note: {
+        // Background only. Glyphs come from the native overlay
+        // (`note-overlay.tsx`), since Skia has no text input and RN's text engine
+        // handles wrapping and font fallback far better.
+        const rect = Skia.XYWHRect(layer.x, layer.y, layer.width, layer.height);
+
+        // Offset drop shadow, so a note reads as a physical object sitting on the
+        // page rather than a flat rectangle. The web app got this from a Tailwind
+        // `shadow-md` on the foreignObject.
+        const shadow = Skia.Paint();
+        shadow.setStyle(PaintStyle.Fill);
+        shadow.setAntiAlias(true);
+        shadow.setColor(Skia.Color("rgba(0,0,0,0.18)"));
+        canvas.drawRRect(
+          Skia.RRectXY(
+            Skia.XYWHRect(
+              layer.x + 3,
+              layer.y + 4,
+              layer.width,
+              layer.height
+            ),
+            3,
+            3
+          ),
+          shadow
+        );
+
+        // Default to sticky-note yellow rather than black when no fill is set.
+        fill.setColor(
+          Skia.Color(layer.fill ? colorToCss(layer.fill) : "#facc15")
+        );
+        canvas.drawRRect(Skia.RRectXY(rect, 3, 3), fill);
+        break;
+      }
+
       case LayerType.Text: {
-        if (layer.type === LayerType.Note) {
-          const rect = Skia.XYWHRect(
-            layer.x,
-            layer.y,
-            layer.width,
-            layer.height
-          );
-          fill.setColor(
-            Skia.Color(layer.fill ? colorToCss(layer.fill) : "#000000")
-          );
-          canvas.drawRRect(Skia.RRectXY(rect, 2, 2), fill);
-        }
+        // Glyphs only — nothing for Skia to draw.
         break;
       }
 

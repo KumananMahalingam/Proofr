@@ -1,7 +1,13 @@
 /**
  * Skia + Liveblocks collaborative canvas.
  */
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { StyleSheet, View } from "react-native";
 import {
   Canvas,
@@ -45,6 +51,7 @@ import {
 import {
   colorToCss,
   connectionIdToColor,
+  getLayer,
   hitTestLayers,
   penPointsToPathLayer,
 } from "@/lib/canvas-utils";
@@ -65,6 +72,23 @@ import { StepMarkers } from "./step-markers";
 
 const MAX_LAYERS = 10_000;
 const ERASER_RADIUS = 14;
+
+/**
+ * On-screen size for freshly inserted layers, in points. Converted to canvas
+ * units at insert time using the current zoom.
+ */
+const INSERT_SIZE_ON_SCREEN: Record<
+  | LayerType.Rectangle
+  | LayerType.Ellipse
+  | LayerType.Text
+  | LayerType.Note,
+  { width: number; height: number }
+> = {
+  [LayerType.Rectangle]: { width: 160, height: 120 },
+  [LayerType.Ellipse]: { width: 150, height: 150 },
+  [LayerType.Note]: { width: 170, height: 170 },
+  [LayerType.Text]: { width: 220, height: 70 },
+};
 
 /** ~20Hz. Enough for smooth remote ink, low enough to not flood the socket. */
 const PRESENCE_INTERVAL_MS = 50;
@@ -170,24 +194,48 @@ export const SkiaCanvas = ({
       const liveLayers = storage.get("layers");
       if (liveLayers.size >= MAX_LAYERS) return;
 
+      /**
+       * Size new layers in SCREEN terms, then convert to canvas units.
+       *
+       * The web app inserted everything at a fixed 100x100 canvas units, which
+       * was fine at 100% zoom on a desktop. On a phone you are often at 40% zoom,
+       * where 100 units is a 40pt square — too small to read or grab. Dividing by
+       * the current zoom means a new note or shape always arrives at a usable
+       * on-screen size regardless of how far you are zoomed out.
+       */
+      const zoom = camera.zoom.value || 1;
+      const screenSize = INSERT_SIZE_ON_SCREEN[layerType];
+      const width = screenSize.width / zoom;
+      const height = screenSize.height / zoom;
+
       const layerId = nanoid();
       liveLayers.set(
         layerId,
         new LiveObject({
           type: layerType,
-          x: position.x,
-          y: position.y,
-          height: 100,
-          width: 100,
+          // Centre the new layer on the tap rather than hanging it off the
+          // bottom-right, which is what a top-left anchor feels like on touch.
+          x: position.x - width / 2,
+          y: position.y - height / 2,
+          width,
+          height,
           fill: lastUsedColor,
         })
       );
       storage.get("layerIds").push(layerId);
 
       setMyPresence({ selection: [layerId] }, { addToHistory: true });
+
+      // Drop straight back to Select so the thing you just made can be moved or
+      // typed into, instead of the next tap making another one.
       setCanvasState({ mode: CanvasMode.None });
+
+      // Text and notes exist to be written in, so open the editor immediately.
+      if (layerType === LayerType.Text || layerType === LayerType.Note) {
+        setEditingNoteId(layerId);
+      }
     },
-    [lastUsedColor, setCanvasState]
+    [camera.zoom, lastUsedColor, setCanvasState]
   );
 
   const eraseAtPoint = useMutation(({ storage, self, setMyPresence }, point: Point) => {
@@ -236,17 +284,15 @@ export const SkiaCanvas = ({
     return true;
   }, []);
 
-  const translateSelection = useMutation(
-    ({ storage, self }, offset: Point) => {
-      const liveLayers = storage.get("layers");
-      for (const id of self.presence.selection) {
-        const layer = liveLayers.get(id);
-        if (!layer) continue;
-        layer.update({
-          x: layer.get("x") + offset.x,
-          y: layer.get("y") + offset.y,
-        });
-      }
+  const translateLayer = useMutation(
+    ({ storage }, layerId: string, offset: Point) => {
+      const layer = storage.get("layers").get(layerId);
+      if (!layer) return;
+
+      layer.update({
+        x: layer.get("x") + offset.x,
+        y: layer.get("y") + offset.y,
+      });
     },
     []
   );
@@ -301,17 +347,61 @@ export const SkiaCanvas = ({
       const hit = hitTestLayers(layerIds ?? [], layers, point);
       selectLayer(hit);
       setEditingNoteId(null);
-
-      if (hit) {
-        setCanvasState({ mode: CanvasMode.Translating, current: point });
-      }
     },
     [canvasState, insertLayer, layerIds, layers, selectLayer]
   );
 
-  const onTranslate = useCallback(
-    (offset: Point) => translateSelection(offset),
-    [translateSelection]
+  /**
+   * Layer currently being dragged, if any.
+   *
+   * Direct manipulation: pressing a layer and moving picks it up straight away,
+   * rather than requiring select-then-drag as two separate gestures. Hit testing
+   * needs the JS thread, so the gesture worklet hands the start point over and
+   * this ref carries the answer through the rest of the drag.
+   */
+  const draggingId = useRef<string | null>(null);
+
+  const onDragStart = useCallback(
+    (point: Point) => {
+      const hit = hitTestLayers(layerIds ?? [], layers, point);
+      draggingId.current = hit;
+
+      if (hit) {
+        history.pause();
+        selectLayer(hit);
+      }
+    },
+    [history, layerIds, layers, selectLayer]
+  );
+
+  const onDragMove = useCallback(
+    (offset: Point) => {
+      if (!draggingId.current) return;
+      translateLayer(draggingId.current, offset);
+    },
+    [translateLayer]
+  );
+
+  const onDragEnd = useCallback(() => {
+    if (draggingId.current) history.resume();
+    draggingId.current = null;
+  }, [history]);
+
+  /** Long press or double tap on a text/note layer opens its editor. */
+  const onEditRequest = useCallback(
+    (point: Point) => {
+      const hit = hitTestLayers(layerIds ?? [], layers, point);
+      if (!hit) return;
+
+      const layer = getLayer(layers, hit);
+      if (layer?.type !== LayerType.Text && layer?.type !== LayerType.Note) {
+        return;
+      }
+
+      selectLayer(hit);
+      setEditingNoteId(hit);
+    },
+    [layerIds, layers, selectLayer]
   );
 
 
@@ -343,7 +433,10 @@ export const SkiaCanvas = ({
         return;
       }
 
+      // Select mode: work out on the JS thread whether a layer is under the
+      // finger, so a drag can move it directly.
       lastTranslate.value = point;
+      scheduleOnRN(onDragStart, point);
     })
     .onUpdate((e) => {
       "worklet";
@@ -367,14 +460,14 @@ export const SkiaCanvas = ({
         return;
       }
 
-      if (canvasState.mode === CanvasMode.Translating) {
-        const offset = {
-          x: point.x - lastTranslate.value.x,
-          y: point.y - lastTranslate.value.y,
-        };
-        lastTranslate.value = point;
-        scheduleOnRN(onTranslate, offset);
-      }
+      // Deltas rather than absolute positions, so the layer tracks the finger
+      // even though the hit test resolved a frame or two late.
+      const offset = {
+        x: point.x - lastTranslate.value.x,
+        y: point.y - lastTranslate.value.y,
+      };
+      lastTranslate.value = point;
+      scheduleOnRN(onDragMove, offset);
     })
     .onEnd(() => {
       "worklet";
@@ -384,6 +477,25 @@ export const SkiaCanvas = ({
         scheduleOnRN(onDrawEnd, points);
       }
       eraserCursor.value = null;
+      scheduleOnRN(onDragEnd);
+    });
+
+  // A firm press on a text or sticky note opens its editor.
+  const longPress = Gesture.LongPress()
+    .minDuration(400)
+    .onStart((e) => {
+      "worklet";
+      if (drawingMode) return;
+      scheduleOnRN(onEditRequest, toCanvas(e.x, e.y));
+    });
+
+  // Double tap does the same, since that is the other convention people reach for.
+  const doubleTap = Gesture.Tap()
+    .numberOfTaps(2)
+    .onEnd((e, success) => {
+      "worklet";
+      if (!success || drawingMode) return;
+      scheduleOnRN(onEditRequest, toCanvas(e.x, e.y));
     });
 
   const tap = Gesture.Tap().onEnd((e, success) => {
@@ -398,8 +510,16 @@ export const SkiaCanvas = ({
     scheduleOnRN(onTap, toCanvas(e.x, e.y));
   });
 
+  /**
+   * Gesture priority, outermost first.
+   *
+   * Two-finger pan/zoom always runs alongside everything else. Within the
+   * one-finger tools, the order inside `Race` matters: the double tap and long
+   * press must be offered the chance to win before the single tap and the pan,
+   * or a double tap would register as two selects and a long press as a select.
+   */
   const gesture = Gesture.Simultaneous(
-    Gesture.Race(tap, toolPan),
+    Gesture.Race(doubleTap, longPress, tap, toolPan),
     Gesture.Simultaneous(cameraPinch, cameraPan)
   );
 
@@ -513,7 +633,7 @@ export const SkiaCanvas = ({
             layerIds={layerIds ?? []}
             layers={layers}
             editingNoteId={editingNoteId}
-            onRequestEdit={setEditingNoteId}
+            onDoneEditing={() => setEditingNoteId(null)}
           />
         </Animated.View>
       </View>
