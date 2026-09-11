@@ -1,21 +1,5 @@
 /**
  * Camera (pan + zoom) held entirely in Reanimated shared values.
- *
- * This is the single most important structural difference from the web app.
- * There, camera lived in React state and pan/zoom re-rendered the whole layer
- * tree on every frame — survivable because the browser only had to recompute
- * one CSS transform on a `<g>`. In RN that pattern would cross the JS bridge
- * 60+ times a second while your finger is down.
- *
- * Keeping the camera in shared values and feeding it to a Skia `<Group
- * transform>` means panning and zooming never touch the JS thread and never
- * re-render a single layer.
- *
- * `overlayStyle` exposes the same transform as a Reanimated view style so the
- * native overlay (note text, tooltips, cursor labels) tracks the canvas on the
- * UI thread too. That preserves the property the web app got from putting
- * overlays inside the transformed `<g>`: everything stays glued to content
- * under pan and zoom, for free.
  */
 import { Gesture } from "react-native-gesture-handler";
 import {
@@ -27,28 +11,12 @@ import {
 import { MAX_ZOOM, MIN_ZOOM, type Camera, type Point } from "@/types/canvas";
 import { clampWorklet } from "@/lib/canvas-utils";
 
-/**
- * Inferred rather than hand-declared. Reanimated 4 renamed several of the
- * relevant return types (`DerivedValue`, the animated-style types), and pinning
- * them by name here would just be a second thing to keep in sync.
- *
- * Members:
- *   x / y / zoom  - raw shared values
- *   transform     - feed into a Skia `<Group transform={...}>`
- *   overlayStyle  - feed into an `<Animated.View style={...}>` for overlays
- *   pinch / pan   - two-finger gestures; one finger is reserved for tools
- *   toCanvas      - worklet-safe screen -> canvas conversion
- *   snapshot      - JS-thread read, for low-frequency work like "insert at centre"
- */
 export type CameraController = ReturnType<typeof useCamera>;
 
 export function useCamera() {
   const x = useSharedValue(0);
   const y = useSharedValue(0);
   const zoom = useSharedValue(1);
-
-  // Gesture-start baseline. Deriving from a baseline rather than accumulating
-  // deltas avoids drift over long gestures.
   const startX = useSharedValue(0);
   const startY = useSharedValue(0);
   const startZoom = useSharedValue(1);
@@ -76,8 +44,6 @@ export function useCamera() {
     })
     .onUpdate((e) => {
       "worklet";
-      // Identical anchoring maths to the web app's `zoomCameraAt`: the canvas
-      // point under the focal point stays under the focal point.
       const next = clampWorklet(startZoom.value * e.scale, MIN_ZOOM, MAX_ZOOM);
       const ratio = next / startZoom.value;
       zoom.value = next;
@@ -86,9 +52,7 @@ export function useCamera() {
     });
 
   const pan = Gesture.Pan()
-    // Two fingers pans; one finger belongs to whichever tool is active. This
-    // replaces ~120 lines of manual `activePointersRef` / `pinchStartRef`
-    // bookkeeping and capture-phase native listeners in the web canvas.
+    // Two fingers pans; one finger belongs to whichever tool is active.
     .minPointers(2)
     .averageTouches(true)
     .onStart(() => {
@@ -114,13 +78,7 @@ export function useCamera() {
     zoom: zoom.value,
   });
 
-  /**
-   * Zoom by a factor about a screen point. Called from the JS thread by the
-   * on-screen zoom controls — writing shared values from JS is allowed, and the
-   * Skia group picks the change up on the next frame without a React re-render.
-   *
-   * Same anchoring maths as the pinch gesture and as the web `zoomCameraAt`.
-   */
+
   const zoomBy = (factor: number, screenX: number, screenY: number) => {
     const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom.value * factor));
     const ratio = next / zoom.value;
@@ -135,7 +93,6 @@ export function useCamera() {
     zoom.value = 1;
   };
 
-  /** Centre the given canvas-space rect in a viewport of the given size. */
   const fitTo = (
     bounds: { x: number; y: number; width: number; height: number },
     viewport: { width: number; height: number },

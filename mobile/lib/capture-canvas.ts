@@ -1,16 +1,3 @@
-/**
- * Replacement for `lib/capture-canvas.ts`.
- *
- * The web version cloned the live `<svg>`, rewrote its `viewBox`, neutralised
- * the camera transform, serialised it to a blob, loaded that into an `Image`,
- * and rasterised it through a 2D canvas — five failure points, plus a
- * `SecurityError` risk from tainted cross-origin images.
- *
- * Skia collapses all of that into: make an offscreen surface, apply the same
- * viewBox maths as a plain canvas transform, replay `drawLayers`, snapshot.
- * No DOM, no CORS, and no possibility of the capture disagreeing with what's
- * on screen, because it calls the exact same draw function.
- */
 import { ImageFormat, Skia, type SkImage } from "@shopify/react-native-skia";
 
 import { LayerType } from "@/types/canvas";
@@ -35,18 +22,11 @@ export interface CaptureOptions {
   maxDim?: number;
   /** Ceiling on upscaling of small drawings. */
   maxUpscale?: number;
-  /** Pass `[LayerType.Path]` to send the model only the student's ink. */
   onlyTypes?: readonly LayerType[];
 }
 
 export interface CaptureResult {
-  /** Bare base64 (no data-URL prefix), matching `captureCanvas`'s return. */
   base64: string;
-  /**
-   * The region actually rendered, in canvas coordinates and with padding
-   * already applied. Marker placement must be interpreted against this exact
-   * rect — same contract as the web `captureWorkingArea`.
-   */
   bounds: CanvasBounds;
 }
 
@@ -67,18 +47,6 @@ export function captureLayers({
     height: Math.max(1, Math.ceil(bounds.height + padding * 2)),
   };
 
-  /**
-   * Scale to fill `maxDim`, upscaling when the drawing is small.
-   *
-   * The web version was `Math.min(1, maxDim / longest)` — downscale only — which
-   * made sense on a desktop canvas where a page of working was already ~1000px.
-   * On a phone the captured region is often much smaller in canvas units, and
-   * capping at 1x handed the model a small, thin-inked image. That is a large part
-   * of why recognition struggles here compared with the web app.
-   *
-   * Upscaling is capped: past a point it just costs upload size and encode time
-   * without adding any real detail.
-   */
   const longest = Math.max(viewBox.width, viewBox.height);
   const scale = Math.min(maxUpscale, maxDim / longest);
 
@@ -94,8 +62,6 @@ export function captureLayers({
   try {
     const canvas = surface.getCanvas();
 
-    // The model reads dark ink; give it an opaque white page rather than the
-    // transparent black an unfilled surface would encode to.
     canvas.clear(Skia.Color("#ffffff"));
 
     canvas.save();
@@ -115,8 +81,6 @@ export function captureLayers({
     console.error("[capture] failed", error);
     return null;
   } finally {
-    // Offscreen surfaces hold GPU memory and the recognition pipeline fires on
-    // every stroke, so leaking one per capture will end badly.
     surface.dispose?.();
   }
 }

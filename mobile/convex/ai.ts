@@ -1,81 +1,19 @@
 "use node";
 
-/**
- * AI actions: problem extraction, tutoring analysis, and live step marking.
- *
- * Replaces `app/api/extract-math`, `app/api/analyse-problem`, and
- * `app/api/recognize-math` from the web app. Expo has no server, so these run as
- * Convex actions with the API keys held on the deployment, never on the device.
- *
- * The per-task model split is deliberate and carried over from the web app,
- * because each step has genuinely different requirements:
- *
- *   extractMath     -> Gemini 3.8 Flash      vision OCR of printed math
- *   analyseProblem  -> gpt-oss-120b on Groq  text reasoning, no vision needed
- *   recognizeMath   -> Qwen 3.8 27B on Groq  vision, latency-critical per stroke
- *
- * Required Convex environment variables:
- *   npx convex env set GEMINI_API_KEY <key>
- *   npx convex env set GROQ_API_KEY   <key>
- */
 import { v } from "convex/values";
 
 import { action } from "./_generated/server";
 
-// ---------------------------------------------------------------------------
-// Models
-// ---------------------------------------------------------------------------
-
-/** Upgraded from the web app's `gemini-2.5-flash`. */
 const GEMINI_VISION_MODEL = "gemini-3.8-flash";
-
-/**
- * Used only when the primary model returns a retryable error. The newest Flash
- * model is the most contended and returns 503 UNAVAILABLE under load; an older
- * GA model is usually free, and for OCR of printed math the accuracy difference
- * is far smaller than the difference between a result and an error.
- */
 const GEMINI_FALLBACK_MODEL = "gemini-3.6-flash";
-
-/**
- * Replaces `llama-3.3-70b-versatile`, which Groq deprecated in June 2026 and shut
- * down for free and developer tiers that August. Text only — cannot be used for
- * the vision routes.
- */
 const GROQ_TEXT_MODEL = "openai/gpt-oss-120b";
-
-/**
- * Vision model for per-stroke marking, replacing the deprecated
- * `meta-llama/llama-4-scout-17b-16e-instruct`.
- *
- * Confirmed vision-capable by probing this account's key directly: Groq's
- * /models endpoint does not report modality, and both Qwen builds accept
- * OpenAI-style `image_url` content parts and answer, whereas text-only models on
- * the account reject the request with "content must be a string".
- *
- * Keeping this path on Groq preserves the reason the web app chose Groq here in
- * the first place: recognition fires after every stroke, so inference latency
- * matters more than peak accuracy.
- */
 const GROQ_VISION_MODEL = "qwen/qwen3.8-27b";
 const GROQ_VISION_FALLBACK_MODEL = "qwen/qwen3.6-27b";
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
-/** Upstream statuses worth retrying: rate limits and transient server errors. */
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 type UpstreamError = Error & { status?: number; retryable?: boolean };
 
-/**
- * POST with exponential backoff on retryable statuses.
- *
- * Deliberately small: a Convex action has a wall-clock budget and the user is
- * watching a spinner, so this is a few hundred milliseconds of patience rather
- * than a serious retry policy.
- */
 async function postWithRetry(
   url: string,
   init: RequestInit,
@@ -108,9 +46,7 @@ async function postWithRetry(
 }
 
 /**
- * Turns a provider error body into something worth showing a student. The panel
- * renders `error.message` directly, so a wall of provider JSON is useless to the
- * person holding the phone.
+ * Turns a provider error body into something worth showing a student.
  */
 function describeUpstreamFailure(status: number, body: string): string {
   if (status === 429) {
@@ -170,9 +106,7 @@ function parseJsonFromText(raw: string): unknown {
 }
 
 /**
- * Strips LaTeX that renders badly as plain text. Verbatim from the web route —
- * the extracted string is shown in a monospace block, not typeset, so table
- * rules and environments are noise.
+ * Strips LaTeX that renders badly as plain text.
  */
 function cleanLatex(latex: string): string {
   return latex
@@ -186,9 +120,6 @@ function cleanLatex(latex: string): string {
     .trim();
 }
 
-// ---------------------------------------------------------------------------
-// extractMath
-// ---------------------------------------------------------------------------
 
 export const extractMath = action({
   args: { storageId: v.id("_storage") },
@@ -202,9 +133,7 @@ export const extractMath = action({
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
 
-    // Read the image server-side. The web route accepted a base64 data URL in
-    // the request body; since mobile already uploads to Convex storage, the bytes
-    // are on the backend before analysis starts.
+    // Read the image server-side. 
     const blob = await ctx.storage.get(storageId);
     if (!blob) throw new Error("Image not found in storage");
 
@@ -243,9 +172,6 @@ export const extractMath = action({
     try {
       response = await callGemini(GEMINI_VISION_MODEL);
     } catch (error) {
-      // Only fall back for transient failures. A bad key or malformed request
-      // fails identically on the secondary model, so retrying there just doubles
-      // the latency before showing the same error.
       const upstream = error as UpstreamError;
       if (!upstream.retryable) throw error;
 
@@ -271,9 +197,6 @@ export const extractMath = action({
   },
 });
 
-// ---------------------------------------------------------------------------
-// analyseProblem
-// ---------------------------------------------------------------------------
 
 export type ProblemAnalysis = {
   topic: string;
@@ -345,13 +268,10 @@ export const analyseProblem = action({
   },
 });
 
-// ---------------------------------------------------------------------------
-// recognizeMath — live step marking
-// ---------------------------------------------------------------------------
 
 export type StepResult = {
   label: string;
-  /** Normalised fallback coords. The client prefers real stroke geometry. */
+  /** Normalised fallback coords. */
   x: number;
   y: number;
   isCorrect: boolean;
@@ -368,13 +288,7 @@ export type RecognizeResult = {
   retryAfterSeconds?: number;
 };
 
-/**
- * Returned instead of throwing, on every failure path.
- *
- * This is the web app's design rule and it matters more here than anywhere else:
- * recognition fires while the student is drawing, so a failed call must never
- * interrupt the canvas. A bad response degrades the marking overlay, full stop.
- */
+
 const RECOGNIZE_FALLBACK: RecognizeResult = {
   latex: "",
   isCorrect: true,
@@ -383,11 +297,7 @@ const RECOGNIZE_FALLBACK: RecognizeResult = {
   steps: [],
 };
 
-/**
- * Every step is kept even when the model omits coordinates, because the client
- * positions markers from real stroke geometry and only falls back to these.
- * Order is what actually matters — markers map to lines by index.
- */
+
 function normaliseSteps(raw: unknown): StepResult[] {
   if (!Array.isArray(raw)) return [];
 
@@ -410,14 +320,7 @@ function normaliseSteps(raw: unknown): StepResult[] {
   return result;
 }
 
-/**
- * Verbatim from `app/api/recognize-math/route.ts`.
- *
- * Do not casually edit. Per the web app's README these instructions were tuned
- * against real failures — early versions were written around equation solving and
- * mis-marked proofs badly, flagging scaffolding lines like "When n=1" as wrong
- * because they are not standalone equations.
- */
+
 const RECOGNIZE_SYSTEM_PROMPT = `You are a patient, encouraging math teacher reviewing a student's handwritten working on a digital whiteboard.
 
 The image shows the math problem and the student's handwritten ink strokes (their working out, written top to bottom). The problem may be printed text or may itself be handwritten.
@@ -496,16 +399,10 @@ export const recognizeMath = action({
       return RECOGNIZE_FALLBACK;
     }
 
-    // Request shape is unchanged from the web route: same OpenAI-compatible
-    // multimodal message, same JSON mode, same low temperature for mark
-    // stability. Only the model id differs.
     const buildBody = (model: string) =>
       JSON.stringify({
         model,
         temperature: 0.2,
-        // Raised from the web route's 1024. Qwen is a reasoning model, and a
-        // truncated response fails JSON parsing and silently degrades to the
-        // fallback — which reads as "no marks" rather than as an error.
         max_tokens: 2048,
         response_format: { type: "json_object" },
         messages: [
@@ -555,9 +452,6 @@ export const recognizeMath = action({
           `[recognizeMath] groq ${response.status}: ${text.slice(0, 400)}`
         );
 
-        // Surface backoff to the client so it stops hammering. Groq puts the
-        // wait in a header on some responses and in the body on others
-        // ("try again in 12.5s"), so both are checked, as in the web route.
         if (RETRYABLE_STATUS.has(response.status)) {
           const headerRetry = response.headers.get("retry-after");
           const bodyMatch = text.match(/try again in ([\d.]+)s/i);
@@ -602,18 +496,3 @@ export const recognizeMath = action({
     }
   },
 });
-
-/*
- * ---------------------------------------------------------------------------
- * TODO (still to port): markWorking — the deliberate "Submit working" pass
- * ---------------------------------------------------------------------------
- * Separate from live marking: the student explicitly submits, and the model does
- * a slower, more careful full-page pass at lower temperature.
- *
- * Two things to sort out when porting it:
- *   - Model: Gemini 3.8 Flash is the better choice here, since this pass is
- *     deliberate rather than per-stroke and accuracy beats latency.
- *   - The web version showed each error's explanation in a hover tooltip, which
- *     has no touch equivalent. Tap-to-reveal on the mark, rendered in the native
- *     overlay rather than in Skia (which cannot draw text without font setup).
- */

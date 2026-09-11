@@ -1,16 +1,3 @@
-/**
- * Infinite 24px grid, matching the web canvas backdrop.
- *
- * The web version used two CSS `linear-gradient` backgrounds on a fixed div, so
- * the grid did NOT pan or zoom with the content — it was a static texture. Here
- * the grid is drawn inside the camera group, so it tracks the canvas properly and
- * gives you a real sense of position and scale when panning an infinite surface.
- *
- * Only the currently visible region is generated, recomputed on the UI thread
- * from the camera shared values. At the minimum zoom of 0.2 that is on the order
- * of 100 lines, which is nothing for Skia — far cheaper than emitting a fixed
- * huge grid and relying on clipping.
- */
 import { useMemo } from "react";
 import { useWindowDimensions } from "react-native";
 import { Path, Skia } from "@shopify/react-native-skia";

@@ -1,11 +1,5 @@
 /**
  * Progress and feedback readout for live marking.
- *
- * Port of the web `ProgressBar`. Positioned below the header rather than at the
- * bottom, because the bottom of a phone screen belongs to the toolbar.
- *
- * Hidden until there is something to say — no marking has run yet means no bar,
- * rather than a permanent 0% that reads as failure.
  */
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 import Animated, {

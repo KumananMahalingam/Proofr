@@ -1,6 +1,3 @@
-// Must be first: shims atob/btoa and window event methods before Liveblocks or
-// Clerk are evaluated. See polyfills.ts — Liveblocks throws at import time
-// without it.
 import "@/polyfills";
 
 import { useFonts } from "expo-font";
@@ -15,9 +12,7 @@ import { AppProviders } from "@/providers/board-providers";
 SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
-  // `next/font/google` has no RN equivalent, so the note font is loaded at
-  // runtime instead of build time. `note-overlay.tsx` references it by the
-  // family name "Kalam_400Regular".
+
   const [fontsLoaded] = useFonts({ Kalam_400Regular });
 
   if (!fontsLoaded) return null;
@@ -25,9 +20,6 @@ export default function RootLayout() {
   SplashScreen.hideAsync();
 
   return (
-    // GestureHandlerRootView must be the outermost view or no gesture in the
-    // canvas will fire. This is the single most common cause of "the pen tool
-    // does nothing" on a fresh RN Gesture Handler setup.
     <GestureHandlerRootView style={styles.root}>
       <AppProviders>
         <Stack screenOptions={{ headerShown: false }} />

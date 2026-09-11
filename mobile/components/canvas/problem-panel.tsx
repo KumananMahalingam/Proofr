@@ -1,18 +1,5 @@
 /**
  * Problem analysis: extract the problem, then reveal hints and solution.
- *
- * Port of the web `ProblemPanel`, restructured as a modal sheet. The web version
- * was a 380px rail fixed to the right edge — that is most of a phone screen, so it
- * becomes a sheet you open deliberately and dismiss when done.
- *
- * The progressive-hint gating is carried over exactly, because it is the
- * pedagogical point of the feature rather than decoration:
- *   - hints unlock one at a time, in order; you cannot skip to hint 3
- *   - the solution sits behind an explicit "are you sure" confirmation
- *
- * `activeStorageId` comes from the selected image layer, mirroring the web
- * `activeProblemSrc`. Selecting a different problem resets all revealed state so
- * hints from a previous problem cannot leak into a new one.
  */
 import { useEffect, useState } from "react";
 import {
@@ -39,8 +26,6 @@ interface ProblemPanelProps {
   activeStorageId: string | null;
   /**
    * Reports the extracted problem so the marking pipeline can use it as context.
-   * The web app re-extracted it separately inside `HandwritingOverlay`; sharing
-   * it here avoids a second OCR call per problem.
    */
   onProblemExtracted?: (text: string) => void;
 }

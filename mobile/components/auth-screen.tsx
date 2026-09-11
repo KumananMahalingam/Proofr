@@ -1,15 +1,5 @@
 /**
  * Sign in, sign up, and Google SSO.
- *
- * `@clerk/clerk-expo@2.20.0` ships hooks and headless components only — there is
- * no prebuilt `<SignIn />` for Expo at this version, so every screen and flow
- * here is hand-rolled. That also means the web app's "Organization -> Workspace"
- * relabelling via `<ClerkProvider localization>` has no equivalent; the wording
- * is simply whatever we type.
- *
- * Email sign-up is a two-step flow: create the account, then verify a code sent
- * by email. Clerk will not issue a session until the address is verified, so the
- * `pendingVerification` state is required, not optional polish.
  */
 import { useState } from "react";
 import {

@@ -1,12 +1,5 @@
 /**
  * The single source of truth for "what a board looks like".
- *
- * This one function is used for BOTH on-screen rendering (wrapped in
- * `createPicture`) and for the offscreen PNG capture that feeds the vision
- * model. That's deliberate: in the web app, `captureCanvas` cloned the live
- * SVG, so what the model saw was guaranteed to match what the student saw. If
- * mobile had a declarative render path and a separate imperative capture path,
- * the two would drift and marker placement would land on the wrong lines.
  */
 import getStroke from "perfect-freehand";
 import {
@@ -24,15 +17,6 @@ import {
 } from "@/types/canvas";
 import { colorToCss, getLayer, type LayerLookup } from "./canvas-utils";
 
-/**
- * Web `<Path>` options, plus `simulatePressure`.
- *
- * That addition matters: `thinning: 0.5` varies stroke width by pressure, and
- * finger input reports none. Without simulation every stroke renders at a flat
- * mid-width and the ink looks lifeless compared to the desktop app.
- * `simulatePressure` derives width from velocity instead, which is why dropping
- * the pressure component from stored points costs nothing visually.
- */
 export const STROKE_OPTIONS = {
   size: 16,
   thinning: 0.5,
@@ -41,14 +25,6 @@ export const STROKE_OPTIONS = {
   simulatePressure: true,
 } as const;
 
-/**
- * Converts a `perfect-freehand` outline into an SkPath.
- *
- * This is the mobile counterpart of `getSvgPathFromStroke`. Rather than build
- * an SVG `d` string and hand it to `Skia.Path.MakeFromSVGString`, we emit the
- * same quadratic segments straight into an SkPath — identical geometry, no
- * string parse, and no dependence on Skia's SVG path grammar.
- */
 export function outlineToSkPath(outline: number[][]): SkPath {
   const path = Skia.Path.Make();
   if (outline.length === 0) return path;
@@ -63,13 +39,6 @@ export function outlineToSkPath(outline: number[][]): SkPath {
   return path;
 }
 
-/**
- * Cache of committed stroke geometry, keyed on the `points` array identity.
- *
- * Liveblocks hands out a frozen snapshot, so a layer's `points` array keeps a
- * stable reference until that layer actually changes. A WeakMap therefore gives
- * us free invalidation with no eviction policy to tune.
- */
 const pathCache = new WeakMap<StrokePoint[], SkPath>();
 
 export function pathLayerToSkPath(layer: PathLayer): SkPath {
@@ -83,16 +52,6 @@ export function pathLayerToSkPath(layer: PathLayer): SkPath {
   return built;
 }
 
-/**
- * Preview path for the stroke currently under the user's finger.
- *
- * A worklet, so it runs on the UI thread and the live ink never waits on the
- * JS thread. Note this is a *stroked polyline*, not a perfect-freehand outline:
- * regenerating the outline every frame is wasted work when the committed layer
- * will be rebuilt properly on release anyway. The tradeoff is a small visual
- * pop at commit time — tune `PREVIEW_STROKE_WIDTH` against `STROKE_OPTIONS.size`
- * until it's not noticeable.
- */
 export const PREVIEW_STROKE_WIDTH = 9;
 
 export function buildPreviewPath(points: StrokePoint[]): SkPath {
@@ -110,16 +69,8 @@ export function buildPreviewPath(points: StrokePoint[]): SkPath {
 }
 
 export type DrawLayersOptions = {
-  /** Decoded images, keyed by layer id. See `useLayerImages`. */
   images?: ReadonlyMap<string, SkImage>;
-  /** layerId -> outline colour, from other users' selections. */
   selectionColors?: Record<string, string>;
-  /**
-   * Restrict drawing to these layer types. The capture pipeline uses
-   * `[LayerType.Path]` to send the model *only* the student's ink — something
-   * the web SVG-clone capture couldn't actually guarantee, since any layer
-   * overlapping the viewBox got rasterised along with it.
-   */
   onlyTypes?: readonly LayerType[];
 };
 
@@ -188,9 +139,6 @@ export function drawLayers(
 
       case LayerType.Note:
       case LayerType.Text: {
-        // Background only. The glyphs are rendered by the native overlay
-        // (see `note-overlay.tsx`) because Skia has no text input and RN's
-        // text engine handles wrapping and font fallback far better.
         if (layer.type === LayerType.Note) {
           const rect = Skia.XYWHRect(
             layer.x,
@@ -230,7 +178,6 @@ export function drawLayers(
   }
 }
 
-/** Union bounding box, for centring / capture. Mirrors `computeLayerBounds`. */
 export function boundsOf(
   layerIds: readonly string[],
   layers: LayerLookup,
@@ -256,39 +203,10 @@ export function boundsOf(
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
-/**
- * Vertical centre and right edge of each handwritten line, derived from stroke
- * geometry. Direct port of `getPathLineAnchors` from the web `canvas.tsx`.
- *
- * This is the fix the web app's README describes as the hardest problem in the
- * project, and it ports across untouched because it never depended on the
- * renderer — only on bounding boxes already in storage.
- *
- * The split of responsibility is the whole point:
- *   - the MODEL decides judgement and order (which lines exist, top to bottom,
- *     and whether each is right)
- *   - the CLIENT decides position, by clustering strokes into lines
- *
- * Vision models read content well and estimate coordinates badly, so trusting
- * their (x, y) made marks drift between lines. Model verdicts are mapped onto
- * these anchors by index instead.
- */
 export type StrokeLineAnchor = { y: number; rightX: number };
 
-/**
- * Horizontal gap between a line's rightmost ink and its mark, as a fraction of
- * the detected line height. The web app used a flat 20 canvas units, which is
- * invisible next to letters several hundred units tall.
- */
 const LINE_RIGHT_EDGE_RATIO = 0.35;
-
-/**
- * How far apart two strokes' vertical centres can be and still count as the same
- * line, as a fraction of the detected line height.
- */
 const LINE_GROUP_RATIO = 0.7;
-
-/** Floor for tiny drawings, so the threshold never collapses to nothing. */
 const MIN_LINE_THRESHOLD = 16;
 
 export function getPathLineAnchors(
@@ -310,20 +228,6 @@ export function getPathLineAnchors(
 
   if (strokes.length === 0) return [];
 
-  /**
-   * Derive the clustering threshold from the ink itself rather than hardcoding it.
-   *
-   * This is the fix for marks landing mid-line on mobile. The web app's flat
-   * 50-unit threshold assumed desktop-sized handwriting; a finger on a zoomed-out
-   * phone canvas produces letters many times larger, so strokes on the same line
-   * differ in vertical centre by far more than 50 units. Every stroke then became
-   * its own "line", and the model's ordered verdicts mapped onto individual
-   * strokes instead of lines.
-   *
-   * The 75th percentile of stroke heights approximates the height of a tall
-   * letter, which is a good proxy for line height — the median would be dragged
-   * down by dots, minus signs, and equals bars.
-   */
   const sortedHeights = strokes.map((s) => s.height).sort((a, b) => a - b);
   const p75 =
     sortedHeights[Math.min(sortedHeights.length - 1, Math.floor(sortedHeights.length * 0.75))] ?? 0;

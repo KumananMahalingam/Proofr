@@ -1,17 +1,5 @@
 /**
  * Home: pick a workspace, then pick or create a board.
- *
- * This is the minimum needed to reach the canvas, and it exists mainly because
- * two things downstream require an *active organization*:
- *   - `api.boards.get` takes an `orgId`
- *   - the Liveblocks auth action verifies the caller belongs to the board's org
- *
- * The web app got the active org from Clerk's `<OrganizationSwitcher />`, which
- * has no equivalent in `@clerk/clerk-expo@2.20.0`, so selection is wired
- * manually through `useOrganizationList`.
- *
- * Replaces the Expo template home screen. The real dashboard — search,
- * favorites, board cards — is Phase 7.
  */
 import { useEffect, useState } from "react";
 import {
@@ -40,8 +28,7 @@ export default function HomeScreen() {
   });
 
   // Clerk starts with no active organization even when the user belongs to one,
-  // so adopt the first membership automatically. Without this every Convex board
-  // query sits unresolved with `orgId === undefined`.
+  // so adopt the first membership automatically.
   useEffect(() => {
     if (!isLoaded || orgId) return;
     const first = userMemberships.data?.[0];

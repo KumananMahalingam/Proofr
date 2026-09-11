@@ -1,21 +1,5 @@
 /**
  * Mobile layer model.
- *
- * Trimmed from the web `types/canvas.ts`. Because the web app is being retired,
- * this is free to diverge — two deliberate changes:
- *
- *  1. Stroke points are `[x, y]`, not `[x, y, pressure]`. Finger input reports
- *     no pressure, so the third component was a constant 0.5 stored on every
- *     point of every stroke and broadcast on every presence update. Taper is
- *     restored via perfect-freehand's `simulatePressure`, which derives width
- *     from velocity instead. Add the component back when stylus support lands.
- *
- *  2. Image layers hold a Convex storage reference rather than a base64 data
- *     URL. Camera photos are megabytes; base64 in a CRDT is not viable.
- *
- * Removed entirely: `Side`, `XYWH`, and the `Resizing` / `SelectionNet` /
- * `Pressing` canvas modes, since resize handles and marquee selection are cut
- * from the first pass.
  */
 
 export type Color = {
@@ -102,12 +86,7 @@ export type ImageLayer = {
   y: number;
   height: number;
   width: number;
-  /**
-   * Convex `_storage` id. Kept alongside `src` so the file can be deleted when
-   * the layer is, which base64 storage made impossible.
-   */
   storageId: string;
-  /** Resolved Convex storage URL, used for rendering. */
   src: string;
 };
 

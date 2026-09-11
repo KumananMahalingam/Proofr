@@ -1,12 +1,3 @@
-/**
- * DOM-free port of `lib/utils.ts`.
- *
- * Everything here is either copied verbatim from the web app or is a worklet
- * variant of a web helper. Notably absent:
- *   - `cn()` / tailwind-merge  -> styling is handled by NativeWind or StyleSheet
- *   - `pointerEventToCanvasPoint` -> replaced by `screenToCanvas` (a worklet,
- *     because touch coordinates now arrive on the UI thread)
- */
 import type {
   Camera,
   Color,
@@ -33,13 +24,6 @@ export function getContrastingTextColor(color: Color) {
   return luminance > 182 ? "black" : "white";
 }
 
-/**
- * Screen -> canvas coordinate conversion.
- *
- * Marked `worklet` so it can be called directly inside gesture handlers on the
- * UI thread. This is the RN equivalent of `pointerEventToCanvasPoint`, with the
- * identical formula: (screen - pan) / zoom.
- */
 export function screenToCanvas(
   sx: number,
   sy: number,
@@ -55,12 +39,6 @@ export function clampWorklet(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-/**
- * Liveblocks' immutable storage snapshot exposes a `LiveMap` differently
- * across versions (`ReadonlyMap` vs. a plain record). The web app indexes it
- * with `root.layers[id]`; this helper accepts either shape so the mobile code
- * doesn't silently render nothing if that ever changes under you.
- */
 export type LayerLookup =
   | ReadonlyMap<string, Layer>
   | Readonly<Record<string, Layer>>;
@@ -75,14 +53,6 @@ export function getLayer(
   return (layers as Record<string, Layer>)[id];
 }
 
-/**
- * Port of `penPointsToPathLayer`. Same bounding-box-then-rebase logic; the only
- * change is that points are `[x, y]` pairs now that pressure is gone.
- *
- * `resizeBounds` and `findIntersectingLayersWithRectangle` are intentionally
- * absent — resize handles and marquee selection are cut from the first pass.
- * Both port cleanly from `lib/utils.ts` when you're ready for them.
- */
 export function penPointsToPathLayer(points: StrokePoint[], color: Color) {
   if (points.length < 2) {
     throw new Error("Cannot transform points with less than 2 points");
@@ -113,13 +83,6 @@ export function penPointsToPathLayer(points: StrokePoint[], color: Color) {
   };
 }
 
-/**
- * Reverse-order hit test for "what did the user tap on".
- *
- * The web app got this free from the DOM (`onPointerDown` on each `<path>`).
- * With Skia there is no scene graph to hit against, so picking is explicit:
- * walk layers front-to-back and take the first bounding-box hit.
- */
 export function hitTestLayers(
   layerIds: readonly string[],
   layers: LayerLookup,

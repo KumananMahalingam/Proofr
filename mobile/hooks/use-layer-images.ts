@@ -1,13 +1,5 @@
 /**
  * Decodes image layers into SkImages.
- *
- * `useImage()` from react-native-skia can't be called in a loop, and image
- * layers are dynamic, so decoding is done manually into a Map keyed by layer
- * id. `drawLayers` and the capture pipeline both read from that Map.
- *
- * Accepts either a `data:` URL (what the web app stores today) or a remote /
- * local file URI (what you'll want to move to — see the notes on Liveblocks
- * storage limits).
  */
 import { useEffect, useRef, useState } from "react";
 import { Skia, type SkImage } from "@shopify/react-native-skia";

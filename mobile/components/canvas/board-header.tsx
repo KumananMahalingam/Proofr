@@ -1,12 +1,5 @@
 /**
  * Top bar: back, board title, participants, undo/redo — plus a floating zoom pill.
- *
- * Consolidates the web app's `Info` (top-left), `Participants` (top-right) and
- * `ZoomControls` (bottom-right) into what fits a phone. Keyboard shortcuts are
- * gone on mobile, so undo/redo have to be on-screen rather than optional chrome.
- *
- * Every Liveblocks and Convex hook here is deliberately outside the Skia
- * `<Canvas>` subtree — context does not cross that boundary.
  */
 import { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
@@ -88,11 +81,6 @@ export const BoardHeader = ({
         </Pressable>
       </View>
 
-      {/*
-        Only primitives are handed down — never the `camera` object itself. It
-        holds GestureType instances, and any worklet that closes over it fails
-        with "[Worklets] Cannot copy value of type `PinchGesture`".
-      */}
       <ZoomPill
         zoom={camera.zoom}
         zoomBy={camera.zoomBy}
@@ -103,14 +91,7 @@ export const BoardHeader = ({
   );
 };
 
-/**
- * Isolated so the zoom percentage readout re-renders on its own.
- *
- * The zoom level lives in a shared value on the UI thread. Mirroring it into
- * React state is necessary to display it as text, but doing that in the board
- * screen would re-render the whole canvas on every pinch frame — so the mirror is
- * scoped to this component, and throttled to whole percentage points.
- */
+
 const ZoomPill = ({
   zoom,
   zoomBy,
@@ -125,7 +106,6 @@ const ZoomPill = ({
   const { width, height } = useWindowDimensions();
   const [percent, setPercent] = useState(100);
 
-  // Closes over `zoom` only, which is a plain shared value and serialises fine.
   useAnimatedReaction(
     () => Math.round(zoom.value * 100),
     (next, previous) => {

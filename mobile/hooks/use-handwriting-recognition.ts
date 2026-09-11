@@ -1,19 +1,5 @@
 /**
  * Live step marking: capture the canvas after each stroke, mark it, place ticks.
- *
- * Port of the web `HandwritingOverlay` scheduling logic. All four guards are
- * carried over, because without them every finished stroke fires a request and
- * you are instantly rate-limited:
- *
- *   - 2s debounce, so a burst of strokes (one character is often several) becomes
- *     a single request
- *   - 5s minimum interval between successful calls
- *   - one request in flight at a time; concurrent captures are dropped, not queued
- *   - server-driven backoff honouring `retryAfterSeconds`
- *
- * What changed for mobile: capture is a Skia offscreen render rather than an SVG
- * clone rasterised through a 2D canvas, and it runs after interactions so the
- * encode does not hitch the frame the user is drawing on.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { InteractionManager } from "react-native";
@@ -74,9 +60,6 @@ export function useHandwritingRecognition({
   const [state, setState] = useState<VerificationState>(INITIAL_STATE);
   const [markers, setMarkers] = useState<StepMarker[]>([]);
 
-  // Refs so the scheduling effect depends only on `strokeTick` — panning or
-  // re-rendering must not retrigger recognition, but when it does fire it needs
-  // the latest layers.
   const latest = useRef({ layerIds, layers, images, problemText });
   useEffect(() => {
     latest.current = { layerIds, layers, images, problemText };
@@ -86,19 +69,6 @@ export function useHandwritingRecognition({
   const nextAllowedAt = useRef(0);
   const pendingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  /**
-   * Tracks unmount only — deliberately NOT "a newer stroke arrived".
-   *
-   * The first version keyed the scheduling effect on `strokeTick` and set a
-   * `cancelled` flag in its cleanup, which meant every new stroke discarded the
-   * result of the request already in flight. While the student was actively
-   * writing, every response was thrown away and only the one after they stopped
-   * was ever applied — so the progress bar sat at 0% and then jumped straight to
-   * 100% at the end instead of climbing as the work developed.
-   *
-   * A late result is still useful: it describes strictly less ink than is on the
-   * canvas now, and the next run will supersede it.
-   */
   const mounted = useRef(true);
   useEffect(
     () => () => {
@@ -108,14 +78,11 @@ export function useHandwritingRecognition({
     []
   );
 
-  /** Wipes marks whose positions no longer match the ink (e.g. after erasing). */
   const clearMarks = useCallback(() => {
     setMarkers([]);
     setState((prev) => ({ ...prev, percentage: 0, feedback: "" }));
   }, []);
 
-  // Held in a ref so the scheduler survives across stroke ticks. Reassigned each
-  // render so it always closes over the current `recognizeMath`.
   const runRef = useRef<() => Promise<void>>(async () => {});
 
   runRef.current = async () => {
@@ -138,12 +105,8 @@ export function useHandwritingRecognition({
       const bounds = boundsOf(ids, map);
       if (!bounds) return;
 
-      // Snapshot anchors at capture time. More strokes may land while the
-      // request is in flight, and markers must line up with what the model saw.
       const anchors = getPathLineAnchors(ids, map);
 
-      // Encoding a PNG is synchronous and would hitch the frame if it landed
-      // mid-gesture.
       const capture = await new Promise<ReturnType<typeof captureLayers>>(
         (resolve) => {
           InteractionManager.runAfterInteractions(() => {
@@ -191,8 +154,6 @@ export function useHandwritingRecognition({
           return;
         }
 
-        // Map ordered verdicts onto real line anchors by index. Falls back to the
-        // model's normalised coordinates only when there is no matching ink.
         const next: StepMarker[] = result.steps.map((step, index) => {
           const anchor = anchors[index];
           return {
@@ -235,8 +196,6 @@ export function useHandwritingRecognition({
     }
   };
 
-  // A new stroke only ever restarts the debounce. It never invalidates a request
-  // already in flight — see the note on `mounted` above.
   useEffect(() => {
     if (strokeTick <= 0) return;
 

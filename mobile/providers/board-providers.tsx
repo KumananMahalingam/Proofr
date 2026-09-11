@@ -1,14 +1,5 @@
 /**
  * Provider stack for the mobile app: Clerk -> Convex -> Liveblocks.
- *
- * Ports `providers/convex-client-provider.tsx` and `components/room.tsx`.
- *
- * The one genuinely non-obvious change is `authEndpoint`. On web it was the
- * string `"/api/liveblocks-auth"`, and Liveblocks POSTed to it with the browser
- * attaching Clerk's session cookie automatically. On Expo there is no cookie
- * and no same-origin endpoint, so the string form cannot authenticate. The
- * callback form is required, and it routes through the Convex client, which
- * already holds the Clerk token.
  */
 import React, { type ReactNode, useCallback } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
@@ -39,10 +30,6 @@ const convex = new ConvexReactClient(process.env.EXPO_PUBLIC_CONVEX_URL!, {
   unsavedChangesWarning: false,
 });
 
-/**
- * Clerk needs somewhere durable to keep the session. `localStorage` doesn't
- * exist, so tokens go in the platform keychain.
- */
 const tokenCache = {
   async getToken(key: string) {
     try {
@@ -70,12 +57,6 @@ export const AppProviders = ({ children }: { children: ReactNode }) => {
         <Authenticated>
           <LiveblocksAuthProvider>{children}</LiveblocksAuthProvider>
         </Authenticated>
-        {/*
-          Without this branch an unsigned launch renders nothing at all. The web
-          app never needed it because `middleware.ts` redirected to Clerk's
-          hosted pages before any React ran; there is no middleware on a device,
-          so the unauthenticated state has to be handled in the tree.
-        */}
         <Unauthenticated>
           <AuthScreen />
         </Unauthenticated>
@@ -105,7 +86,6 @@ const LiveblocksAuthProvider = ({ children }: { children: ReactNode }) => {
   );
 };
 
-/** Port of `components/room.tsx`. Initial storage is unchanged. */
 export const Room = ({
   children,
   roomId,

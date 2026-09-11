@@ -1,9 +1,5 @@
 /**
  * Delete the currently selected layers.
- *
- * Port of `hooks/use-delete-layers.ts`. On the web this was reachable via the
- * Backspace key; there is no keyboard here, so it is wired to the trash button in
- * the toolbar's colour row instead.
  */
 import { useMutation, useSelf } from "@/liveblocks.config";
 

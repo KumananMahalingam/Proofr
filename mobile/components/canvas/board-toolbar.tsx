@@ -1,13 +1,5 @@
 /**
  * Bottom tool bar and colour row.
- *
- * The web app had a vertical rail pinned to the left edge plus a floating
- * selection-tools popover. Neither survives a 390pt-wide screen, so tools move to
- * a horizontal bar along the bottom — within thumb reach — and the colour swatches
- * appear above it only when they are relevant (pen active, or a layer selected).
- *
- * Same tool set as the web `Toolbar` plus `SelectionTools`, minus the two features
- * cut from the first pass (resize handles and marquee selection).
  */
 import { ScrollView, StyleSheet, Pressable, Text, View } from "react-native";
 import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";

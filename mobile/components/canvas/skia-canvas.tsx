@@ -1,33 +1,5 @@
 /**
  * Skia + Liveblocks collaborative canvas.
- *
- * Port of `app/board/[boardId]/_components/canvas.tsx`. All of the Liveblocks
- * storage logic is carried over unchanged — `insertLayer`, `insertPath`,
- * `eraseAtPoint`, `translateSelectedLayers` are the same mutations against the
- * same `LiveMap` / `LiveList`, so a mobile client and a web client can share a
- * room with no schema translation.
- *
- * What changed, and why:
- *
- *  1. Rendering. One `<Picture>` holding every committed layer, instead of one
- *     React element per layer. The web app leaned on the DOM for hit testing
- *     and camera transforms; Skia has no scene graph, so keeping thousands of
- *     React nodes buys nothing and costs reconciliation time. Committed layers
- *     rebuild once per storage change, not once per frame.
- *
- *  2. The live stroke. Points accumulate in a shared value and the preview path
- *     is derived on the UI thread, so ink appears under the finger without a
- *     round trip to JS. Only the finished stroke crosses back to JS, exactly
- *     once, to be committed to storage.
- *
- *  3. Presence broadcast is throttled explicitly. On web, `continueDrawing`
- *     called `setMyPresence` on every pointermove and the browser coalesced it.
- *     Here it's a deliberate ~20Hz so a 120Hz Apple Pencil doesn't saturate the
- *     socket.
- *
- * Not yet ported (deliberately, see the plan): resize handles, marquee
- * selection, and step/marking overlays. Those belong in the native overlay
- * layer alongside note text.
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -50,11 +22,6 @@ import Animated, {
   useDerivedValue,
   useSharedValue,
 } from "react-native-reanimated";
-// Reanimated 4 moved every worklet-threading helper into `react-native-worklets`
-// and dropped them from its own entry point, so `runOnJS` is not importable from
-// "react-native-reanimated" any more. `scheduleOnRN` is the current name —
-// `runOnJS` still exists but is deprecated, and it has a different shape:
-// `runOnJS(fn)(args)` vs. `scheduleOnRN(fn, args)`.
 import { scheduleOnRN } from "react-native-worklets";
 import { LiveObject } from "@liveblocks/client";
 import { nanoid } from "nanoid/non-secure";
@@ -107,10 +74,6 @@ interface SkiaCanvasProps {
   canvasState: CanvasState;
   setCanvasState: (state: CanvasState) => void;
   lastUsedColor: Color;
-  /**
-   * Owned by the board screen so the header's zoom controls can drive it. The
-   * canvas does not create its own camera.
-   */
   camera: CameraController;
   /** Extracted problem text, passed to the model as context for marking. */
   problemText?: string;
@@ -128,18 +91,6 @@ export const SkiaCanvas = ({
 }: SkiaCanvasProps) => {
   const canvasRef = useCanvasRef();
 
-  // Destructured up front, and it must stay that way.
-  //
-  // Reanimated serialises everything a worklet closes over. `useCamera()`
-  // returns an object that also holds GestureType instances (pinch/pan), and
-  // those cannot be copied to the UI thread. Writing `camera.toCanvas(...)`
-  // inside a gesture callback captures the whole `camera` object and fails at
-  // runtime with:
-  //
-  //   [Worklets] Cannot copy value of type `PinchGesture`
-  //
-  // Referencing the extracted `toCanvas` instead captures only that function,
-  // which closes over shared values and serialises fine.
   const {
     transform: cameraTransform,
     overlayStyle: cameraOverlayStyle,
@@ -157,11 +108,6 @@ export const SkiaCanvas = ({
   const images = useLayerImages(layerIds ?? [], layers);
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
 
-  /**
-   * Incremented once per committed stroke, and after erasing. This is the single
-   * trigger for the whole marking pipeline — the mobile equivalent of the web
-   * app's `strokeEndTick`.
-   */
   const [strokeTick, setStrokeTick] = useState(0);
 
   const { state: verification, markers, clearMarks } =
@@ -177,21 +123,11 @@ export const SkiaCanvas = ({
     onVerificationChange?.(verification);
   }, [verification, onVerificationChange]);
 
-  // --- live stroke (UI thread) -------------------------------------------
-
+ 
   const draftPoints = useSharedValue<StrokePoint[]>([]);
   const draftPath = useDerivedValue(() => buildPreviewPath(draftPoints.value));
   const draftColor = useMemo(() => colorToCss(lastUsedColor), [lastUsedColor]);
 
-  /**
-   * Throttle timestamp for presence broadcasts.
-   *
-   * A shared value, not a ref, and deliberately so. The gesture worklet closes
-   * over `broadcastDraft`, and Reanimated serialises that closure — a ref caught
-   * in it triggers "[Worklets] Tried to modify key `current` of an object which
-   * has been already passed to a worklet" the moment JS mutates it. Keeping the
-   * throttle on the UI thread also avoids scheduling JS work just to discard it.
-   */
   const lastPresenceAt = useSharedValue(0);
 
   const broadcastDraft = useCallback(
@@ -200,8 +136,6 @@ export const SkiaCanvas = ({
     },
     [lastUsedColor, updateMyPresence]
   );
-
-  // --- storage mutations (unchanged from the web app) ---------------------
 
   const insertPath = useMutation(
     ({ storage, setMyPresence }, points: StrokePoint[]) => {
@@ -327,8 +261,7 @@ export const SkiaCanvas = ({
     []
   );
 
-  // --- JS-thread gesture callbacks ---------------------------------------
-
+  
   const onDrawStart = useCallback(() => {
     history.pause();
   }, [history]);
@@ -351,8 +284,7 @@ export const SkiaCanvas = ({
       if (!eraseAtPoint(point)) return;
 
       // Erasing moves the geometry the marks were placed against, so existing
-      // ticks are stale immediately. Clear them, then re-run recognition on
-      // what's left — same behaviour as the web eraser.
+      // ticks are gone immediately.
       clearMarks();
       setStrokeTick((tick) => tick + 1);
     },
@@ -382,24 +314,17 @@ export const SkiaCanvas = ({
     [translateSelection]
   );
 
-  // --- gestures -----------------------------------------------------------
 
   const eraserCursor = useSharedValue<Point | null>(null);
   const lastTranslate = useSharedValue<Point>({ x: 0, y: 0 });
-
-  // Drawing tools need to react the instant a finger lands, so a single dot
-  // registers as a stroke. Everything else must NOT, because `Gesture.Race`
-  // awards the gesture to whichever activates first: with `minDistance(0)` the
-  // pan always beat the tap, so tap-to-select never fired and nothing could be
-  // selected — which is why images and shapes could not be deleted.
+  
   const drawingMode =
     canvasState.mode === CanvasMode.Pencil ||
     canvasState.mode === CanvasMode.Eraser;
 
   const toolPan = Gesture.Pan()
     // One finger only. Two fingers is always pan/zoom, which is what makes the
-    // "draw vs. navigate" distinction unambiguous on a touchscreen — the web
-    // app had to disambiguate this by hand with capture-phase pointer listeners.
+    // "draw vs. navigate" distinction 
     .maxPointers(1)
     .minDistance(drawingMode ? 0 : 8)
     .onStart((e) => {
@@ -473,14 +398,10 @@ export const SkiaCanvas = ({
     scheduleOnRN(onTap, toCanvas(e.x, e.y));
   });
 
-  // Pinch runs alongside the tool gesture so a two-finger zoom can interrupt a
-  // one-finger drag without the tool gesture having to know about it.
   const gesture = Gesture.Simultaneous(
     Gesture.Race(tap, toolPan),
     Gesture.Simultaneous(cameraPinch, cameraPan)
   );
-
-  // --- rendering ----------------------------------------------------------
 
   const selections = useOthersMapped((other) => other.presence.selection);
   const selectionColors = useMemo(() => {
@@ -519,16 +440,6 @@ export const SkiaCanvas = ({
   const eraserCx = useDerivedValue(() => eraserRing.value?.x ?? -9999);
   const eraserCy = useDerivedValue(() => eraserRing.value?.y ?? -9999);
 
-  /**
-   * Other users' in-progress strokes, from presence.
-   *
-   * This has to be read here, in the component that *renders* `<Canvas>`, not in
-   * a child inside it. react-native-skia draws its subtree with its own React
-   * reconciler, so React context does not cross the `<Canvas>` boundary — any
-   * Liveblocks hook called inside it fails with "RoomProvider is missing from
-   * the React tree". Geometry is therefore built out here and handed in as plain
-   * data.
-   */
   const othersDrafts = useOthersMapped((other) => ({
     pencilDraft: other.presence.pencilDraft,
     penColor: other.presence.penColor,
@@ -594,12 +505,6 @@ export const SkiaCanvas = ({
           </Group>
         </Canvas>
 
-        {/*
-          Native overlay, camera-transformed on the UI thread. Anything that
-          needs real text, text input, or touch targets lives here rather than
-          in Skia. This is the direct replacement for the web app's
-          `<foreignObject>` usage.
-        */}
         <Animated.View
           pointerEvents="box-none"
           style={[styles.overlay, cameraOverlayStyle]}
@@ -625,8 +530,6 @@ const styles = StyleSheet.create({
     top: 0,
     width: "100%",
     height: "100%",
-    // Required so the scale in `overlayStyle` matches Skia's, which scales
-    // about the canvas origin rather than the view centre.
     transformOrigin: "top left",
   },
 });
