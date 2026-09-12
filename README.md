@@ -10,10 +10,6 @@ between: photograph a problem, handwrite your working on an infinite canvas, and
 each line gets marked correct or incorrect in real time, with a short explanation
 when something's off.
 
-Originally a Next.js web app; now an Expo app. The web version's history is in
-this repository's git log — see [Migration notes](#migration-notes) for what
-changed and why.
-
 ---
 
 ## Features
@@ -117,8 +113,7 @@ layer that happened to overlap the viewBox.
 
 ### Why geometric marker placement instead of trusting the model's coordinates
 
-This was the hardest problem in the project, and the fix survived the migration
-untouched.
+This was the hardest problem in the project.
 
 The obvious approach — ask the vision model for the `(x, y)` of each step and draw
 a checkmark there — fails badly. Vision models are strong at *reading* content and
@@ -136,8 +131,7 @@ Responsibility is split by what each system is actually good at:
 Ordered verdicts are mapped onto those real anchors by index. Model coordinates
 are kept only as a fallback for steps with no matching ink.
 
-**Mobile change:** the web app used a flat 50-unit clustering threshold, tuned for
-desktop-sized handwriting. A finger on a zoomed-out phone canvas produces letters
+**Mobile change:** A finger on a zoomed-out phone canvas produces letters
 many times larger, so every stroke became its own "line" and marks landed
 mid-line. The threshold is now derived from the ink itself — 0.7× the 75th
 percentile of stroke heights, which approximates a tall letter. The 75th
@@ -146,8 +140,7 @@ a median down.
 
 ### Why the capture upscales
 
-The web app clamped capture scale at 1x (`Math.min(1, maxDim / longest)`), which
-was fine where a page of working was already ~1000px. On a phone the captured
+On a phone the captured
 region is often small in canvas units, and capping at 1x handed the model a small,
 thin-inked image. Capture now scales *up* to fill a 2000px target, capped at 3x.
 This was a significant cause of poor recognition before it was fixed.
@@ -168,18 +161,6 @@ One subtlety worth preserving: a new stroke restarts the debounce but must **not
 invalidate a request already in flight. An earlier version discarded in-flight
 results whenever the student kept writing, so the progress bar sat at 0% and then
 jumped to 100% at the end instead of climbing as the work developed.
-
-### Why the AI work lives in Convex actions
-
-An Expo app has no server, so the web version's four Next.js API routes had
-nowhere to go. They became Convex Node actions, which keeps API keys on the
-deployment and off the device — the same reason the web app used route handlers
-rather than calling providers from the browser.
-
-`extractMath` improved in the move: the web route accepted a base64 data URL in
-the request body, so the image travelled browser → server on every call. Since
-mobile already uploads to Convex file storage, the action reads the bytes
-server-side from a `storageId`.
 
 ### Why each AI task uses a different model
 
@@ -254,9 +235,7 @@ interaction model is rebuilt rather than ported:
   records, so the eraser deletes whole strokes within a radius. It filters to
   `LayerType.Path` so the problem photo can't be wiped by accident, and the whole
   gesture is one history entry via `history.pause()`.
-- **Problem images go to Convex file storage, not base64.** The web app inlined
-  images as data URLs. That was survivable for pasted screenshots and is not for
-  phone camera photos — megabytes of base64 inside a CRDT that syncs to every peer.
+- **Problem images go to Convex file storage, not base64.** 
 - **Uploads use `expo-file-system`'s `createUploadTask`.** Reading a `file://` URI
   through `fetch().blob()` round-trips the whole image through the native blob
   store as base64 and fails in practice.
