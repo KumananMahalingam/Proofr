@@ -10,6 +10,11 @@ between: photograph a problem, handwrite your working on an infinite canvas, and
 each line gets marked correct or incorrect in real time, with a short explanation
 when something's off.
 
+<p align="center">
+  <img src="/images/proofr_demo_1.png" width="45%" />
+  <img src="/images/proofr_demo_2.png" width="45%" />
+</p>
+
 ---
 
 ## Features
