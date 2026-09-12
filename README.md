@@ -11,8 +11,9 @@ each line gets marked correct or incorrect in real time, with a short explanatio
 when something's off.
 
 <p align="center">
-  <img src="/images/proofr_demo_1.png" width="45%" />
-  <img src="/images/proofr_demo_2.png" width="45%" />
+  <img src="/images/proofr_demo_1.png" width="30%" />
+  <img src="/images/proofr_demo_2.png" width="30%" />
+  <img src="/images/proofr_demo_3.png" width="30%" />
 </p>
 
 ---
